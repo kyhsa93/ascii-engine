@@ -8,10 +8,12 @@
     "demo": "node examples/cube.ts",
     "web": "vite",
     "build": "tsc && vite build",
-    "check": "tsc && node scripts/check.ts"
+    "check": "tsc && node scripts/check.ts",
+    "viewcheck": "vite build && node scripts/viewcheck.ts"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
+    "playwright": "^1.62.1",
     "typescript": "^5.8.3",
     "vite": "^6.3.5"
   },

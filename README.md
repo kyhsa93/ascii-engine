@@ -14,9 +14,10 @@ there. Two ship with the repo: ANSI escape sequences for a terminal, and a
 
 ```
 npm install
-npm run demo     # terminal: spinning cube, sphere and torus
-npm run web      # browser: the same scene in a <pre>
-npm run check    # typecheck + test suite
+npm run demo      # terminal: spinning cube, sphere and torus
+npm run web       # browser: the same scene in a <pre>
+npm run check     # typecheck + test suite
+npm run viewcheck # build, then drive the browser demo in Chromium
 ```
 
 ## Layout

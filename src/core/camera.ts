@@ -19,6 +19,22 @@ export function aspectFor(width: number, height: number, cellAspect = DEFAULT_CE
   return (width * cellAspect) / height
 }
 
+/**
+ * How far back the camera has to sit for a sphere of `radius` around its
+ * target to fit inside the frustum.
+ *
+ * The field of view is vertical, so on a portrait grid the *horizontal* half
+ * angle is the tighter one and nothing in the projection knows it — a fixed
+ * distance that frames the subject on a wide grid slices it off at the sides
+ * on a narrow one. Fitting to whichever half angle is smaller is the whole
+ * of the fix.
+ */
+export function fitDistance(radius: number, fovY: number, aspect: number, margin = 1.1): number {
+  const halfV = fovY / 2
+  const halfH = Math.atan(Math.tan(halfV) * aspect)
+  return (radius * margin) / Math.sin(Math.min(halfV, halfH))
+}
+
 export class Camera {
   position: Vec3
   target: Vec3

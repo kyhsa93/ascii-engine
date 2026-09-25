@@ -1,6 +1,6 @@
-import { Camera, aspectFor } from '../src/core/camera.ts'
+import { Camera, aspectFor, fitDistance } from '../src/core/camera.ts'
 import { multiply, rotationX, rotationY } from '../src/core/mat4.ts'
-import { cube, sphere, torus } from '../src/core/mesh.ts'
+import { boundingRadius, cube, sphere, torus } from '../src/core/mesh.ts'
 import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
@@ -21,7 +21,9 @@ let shape = 0
 let rampIndex = 0
 let yaw = 0.6
 let pitch = 0.35
-let distance = 5
+// A multiplier on the distance that frames the subject, not a distance: the
+// grid can be any shape, and what "close enough" means depends on its shape.
+let zoom = 1
 let spinning = true
 let showNormals = false
 let spin = 0
@@ -61,10 +63,10 @@ term.onKey((key) => {
       break
     case '+':
     case '=':
-      distance = Math.max(2.2, distance - 0.3)
+      zoom = Math.max(0.6, zoom - 0.1)
       break
     case '-':
-      distance = Math.min(20, distance + 0.3)
+      zoom = Math.min(4, zoom + 0.1)
       break
   }
 })
@@ -75,8 +77,9 @@ const loop = runLoop((dt) => {
   const fb = term.framebuffer()
   fb.clear(0.02, 0.02, 0.05)
 
-  camera.orbit(yaw, pitch, distance)
-  const vp = camera.viewProjection(aspectFor(fb.width, fb.height, term.cellAspect))
+  const aspect = aspectFor(fb.width, fb.height, term.cellAspect)
+  camera.orbit(yaw, pitch, fitDistance(boundingRadius(shapes[shape]!.mesh), camera.fovY, aspect) * zoom)
+  const vp = camera.viewProjection(aspect)
   const model = multiply(rotationY(spin), rotationX(spin * 0.6))
 
   const shader = showNormals

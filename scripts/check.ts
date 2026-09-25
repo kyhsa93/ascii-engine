@@ -7,7 +7,7 @@
  * Run with `npm run check`.
  */
 
-import { Camera, aspectFor } from '../src/core/camera.ts'
+import { Camera, aspectFor, fitDistance } from '../src/core/camera.ts'
 import { Framebuffer } from '../src/core/framebuffer.ts'
 import {
   identity,
@@ -23,7 +23,16 @@ import {
   transformPoint,
   translation,
 } from '../src/core/mat4.ts'
-import { computeNormals, cube, parseObj, plane, sphere, torus, type Mesh } from '../src/core/mesh.ts'
+import {
+  boundingRadius,
+  computeNormals,
+  cube,
+  parseObj,
+  plane,
+  sphere,
+  torus,
+  type Mesh,
+} from '../src/core/mesh.ts'
 import { RAMPS } from '../src/core/ramp.ts'
 import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
@@ -335,6 +344,49 @@ test('cell aspect correction makes a sphere twice as wide as tall in cells', () 
   const { w, h } = bounds(fb)
   const ratio = w / h
   assert(ratio > 1.85 && ratio < 2.2, `silhouette ${w}x${h} cells has ratio ${ratio.toFixed(3)}, expected about 2`)
+})
+
+test('fitDistance is bound by whichever half angle is tighter', () => {
+  const wide = fitDistance(1, Math.PI / 4, 2)
+  const square = fitDistance(1, Math.PI / 4, 1)
+  const tall = fitDistance(1, Math.PI / 4, 0.4)
+  // Past aspect 1 the horizontal half angle is the wider of the two, so the
+  // vertical field of view binds and widening the grid further buys nothing.
+  // Below it the horizontal angle takes over and the camera has to back off.
+  close(wide, square, 1e-9, 'a grid wider than it is tall is bound by the vertical fov')
+  assert(tall > square * 1.5, `a portrait grid should need far more room, got ${tall} against ${square}`)
+  close(square, 1.1 / Math.sin(Math.PI / 8), 1e-9, 'the square case should reduce to the vertical fit')
+})
+
+test('the default framing keeps the subject off the edges, landscape or portrait', () => {
+  // The bug this holds shut: a distance chosen for a wide grid slices the
+  // subject off at the sides of a portrait one, where the horizontal half
+  // angle — not the vertical field of view — is the tighter constraint.
+  const mesh = cube(2)
+  const radius = boundingRadius(mesh)
+
+  for (const [w, h] of [
+    [80, 24],
+    [49, 57],
+  ] as const) {
+    const fb = new Framebuffer(w, h)
+    fb.clear()
+    const aspect = aspectFor(w, h, 0.574)
+    const camera = new Camera({ fovY: Math.PI / 3.2 })
+    camera.orbit(0.6, 0.35, fitDistance(radius, camera.fovY, aspect))
+    drawMesh(fb, mesh, rotationY(0.8), camera.viewProjection(aspect), unlit(vec3(1, 1, 1)))
+
+    assert(coverage(fb) > 0, `nothing drawn on a ${w}x${h} grid`)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        if (fb.depth[y * w + x]! <= 0) continue
+        assert(
+          x > 0 && x < w - 1 && y > 0 && y < h - 1,
+          `the subject reaches cell ${x},${y} on a ${w}x${h} grid — it is being cut off`,
+        )
+      }
+    }
+  }
 })
 
 test('parseObj reads positions, faces and explicit normals', () => {

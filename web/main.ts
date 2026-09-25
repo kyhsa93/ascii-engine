@@ -1,6 +1,6 @@
-import { Camera, aspectFor } from '../src/core/camera.ts'
+import { Camera, aspectFor, fitDistance } from '../src/core/camera.ts'
 import { multiply, rotationX, rotationY } from '../src/core/mat4.ts'
-import { cube, sphere, torus } from '../src/core/mesh.ts'
+import { boundingRadius, cube, sphere, torus } from '../src/core/mesh.ts'
 import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
@@ -23,7 +23,10 @@ let shape = 0
 let rampIndex = 0
 let yaw = 0.6
 let pitch = 0.35
-let distance = 5
+// A multiplier on the distance that frames the subject, not a distance: a
+// phone in portrait is a far narrower frustum than a desktop window, and a
+// fixed distance that suits one cuts the subject off in the other.
+let zoom = 1
 let spinning = true
 let showNormals = false
 let spin = 0
@@ -32,6 +35,29 @@ let frames = 0
 let fps = 0
 let fpsWindow = performance.now()
 let last = performance.now()
+let frameCount = 0
+
+// A read-only probe for scripts/viewcheck.ts. The cell aspect is the one
+// number that cannot be checked outside a browser -- it comes from measuring
+// the page's own font -- so the check has to read the value actually in use
+// rather than measure a second one of its own.
+;(window as unknown as { __engine: unknown }).__engine = {
+  get cellAspect() {
+    return surface.cellAspect
+  },
+  get cols() {
+    return surface.cols
+  },
+  get rows() {
+    return surface.rows
+  },
+  get frames() {
+    return frameCount
+  },
+  get shape() {
+    return shapes[shape]!.name
+  },
+}
 
 addEventListener('resize', () => surface.measure())
 
@@ -52,7 +78,7 @@ screen.addEventListener(
   'wheel',
   (e) => {
     e.preventDefault()
-    distance = Math.max(2.2, Math.min(20, distance + Math.sign(e.deltaY) * 0.4))
+    zoom = Math.max(0.6, Math.min(4, zoom + Math.sign(e.deltaY) * 0.1))
   },
   { passive: false },
 )
@@ -71,6 +97,7 @@ function frame(now: number): void {
   last = now
   if (spinning) spin += dt * 0.7
 
+  frameCount++
   frames++
   if (now - fpsWindow >= 500) {
     fps = (frames * 1000) / (now - fpsWindow)
@@ -81,8 +108,9 @@ function frame(now: number): void {
   const fb = surface.framebuffer()
   fb.clear(0.02, 0.02, 0.05)
 
-  camera.orbit(yaw, pitch, distance)
-  const vp = camera.viewProjection(aspectFor(fb.width, fb.height, surface.cellAspect))
+  const aspect = aspectFor(fb.width, fb.height, surface.cellAspect)
+  camera.orbit(yaw, pitch, fitDistance(boundingRadius(shapes[shape]!.mesh), camera.fovY, aspect) * zoom)
+  const vp = camera.viewProjection(aspect)
   const model = multiply(rotationY(spin), rotationX(spin * 0.6))
 
   const shader = showNormals

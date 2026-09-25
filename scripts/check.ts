@@ -23,7 +23,9 @@ import {
   transformPoint,
   translation,
 } from '../src/core/mat4.ts'
+import { existsSync, readFileSync } from 'node:fs'
 import {
+  boundingBox,
   boundingRadius,
   computeNormals,
   cube,
@@ -31,6 +33,7 @@ import {
   plane,
   sphere,
   torus,
+  writeObj,
   type Mesh,
 } from '../src/core/mesh.ts'
 import { marchScene } from '../src/core/march.ts'
@@ -121,6 +124,61 @@ function bounds(fb: Framebuffer): { w: number; h: number } {
 function colorAt(fb: Framebuffer, x: number, y: number): [number, number, number] {
   const i = (y * fb.width + x) * 3
   return [fb.color[i]!, fb.color[i + 1]!, fb.color[i + 2]!]
+}
+
+interface Facing {
+  fragments: number
+  /** Fragments whose interpolated normal tips past the terminator. */
+  past90: number
+  /** The most it tipped, as a cosine against the direction to the camera. */
+  worstCos: number
+}
+
+/**
+ * Renders a mesh with back faces culled and measures how its interpolated
+ * normals face the camera.
+ *
+ * "No visible fragment faces away" is the obvious invariant and it is not
+ * true. Smooth shading interpolates vertex normals, and at a silhouette they
+ * tip a little past ninety degrees: measured here, 0 of a coarse sphere's
+ * fragments do, 1 of 1263 on a fine one (90.7 degrees), and 5 of 601 on the
+ * torus knot (96.5). The coarse sphere was passing the strict test on luck.
+ *
+ * A flipped winding is not subtle in the same way — it keeps the far side of
+ * the mesh, whose normals point away across the whole frame — so a fraction
+ * and a worst case together separate the artifact from the bug where a single
+ * unnormalized dot product cannot.
+ */
+function facingSurvey(mesh: Mesh, camera: Camera, width = 60, height = 30): Facing {
+  const samples: Sample[] = []
+  const fb = new Framebuffer(width, height)
+  fb.clear()
+  drawMesh(fb, mesh, identity(), camera.viewProjection(aspectFor(width, height, 0.5)), recorder(samples), 'back')
+
+  let past90 = 0
+  let worstCos = 1
+  for (const s of samples) {
+    const vx = camera.position.x - s.px
+    const vy = camera.position.y - s.py
+    const vz = camera.position.z - s.pz
+    const cos =
+      (s.nx * vx + s.ny * vy + s.nz * vz) / (Math.hypot(s.nx, s.ny, s.nz) * Math.hypot(vx, vy, vz) || 1)
+    if (cos < 0) past90++
+    worstCos = Math.min(worstCos, cos)
+  }
+  return { fragments: samples.length, past90, worstCos }
+}
+
+function assertFacesCamera(label: string, f: Facing): void {
+  assert(f.fragments > 200, `${label}: expected a solid silhouette, got ${f.fragments} fragments`)
+  assert(
+    f.past90 / f.fragments < 0.02,
+    `${label}: ${f.past90} of ${f.fragments} fragments face away (${((f.past90 / f.fragments) * 100).toFixed(1)}%)`,
+  )
+  assert(
+    f.worstCos > -0.25,
+    `${label}: a fragment faces ${((Math.acos(Math.max(-1, f.worstCos)) * 180) / Math.PI).toFixed(1)} degrees away`,
+  )
 }
 
 /** A write stream that keeps what was written instead of showing it. */
@@ -306,19 +364,36 @@ const facingCases: { name: string; mesh: Mesh; eye: ReturnType<typeof vec3>; up?
 
 for (const c of facingCases) {
   test(`${c.name} shows only faces that point at the camera`, () => {
-    const fb = new Framebuffer(60, 30)
-    fb.clear()
     const camera = new Camera({ position: c.eye, ...(c.up ? { up: c.up } : {}) })
-    const samples: Sample[] = []
-    drawMesh(fb, c.mesh, identity(), camera.viewProjection(aspectFor(60, 30)), recorder(samples), 'back')
-
-    assert(samples.length > 50, `expected a substantial silhouette, got ${samples.length} fragments`)
-    for (const s of samples) {
-      const dot = s.nx * (c.eye.x - s.px) + s.ny * (c.eye.y - s.py) + s.nz * (c.eye.z - s.pz)
-      assert(dot > 0, `a back face survived culling: n . (eye - p) = ${dot.toFixed(4)}`)
-    }
+    assertFacesCamera(c.name, facingSurvey(c.mesh, camera))
   })
 }
+
+test('a mesh wound inside out fails that same measure', () => {
+  // The tolerance above has to be loose enough for smooth shading and tight
+  // enough to still be worth having. This is the case it exists to catch: with
+  // the winding reversed, culling keeps the far side of the cube, whose
+  // normals point away from the camera across the whole silhouette.
+  const source = cube(2)
+  const flipped: Mesh = {
+    positions: source.positions,
+    normals: source.normals,
+    indices: Uint32Array.from(source.indices),
+  }
+  for (let i = 0; i < flipped.indices.length; i += 3) {
+    const swap = flipped.indices[i]!
+    flipped.indices[i] = flipped.indices[i + 2]!
+    flipped.indices[i + 2] = swap
+  }
+
+  const f = facingSurvey(flipped, new Camera({ position: vec3(2.5, 2, 3.5) }))
+  assert(f.fragments > 200, `the flipped cube should still draw something, got ${f.fragments}`)
+  assert(
+    f.past90 / f.fragments > 0.9,
+    `expected nearly every fragment to face away, got ${((f.past90 / f.fragments) * 100).toFixed(1)}%`,
+  )
+  assert(f.worstCos < -0.5, `expected a decisive failure, worst cosine was ${f.worstCos.toFixed(3)}`)
+})
 
 test('back-face culling is redundant for a closed convex mesh', () => {
   // If the winding and the depth test are both right, dropping back faces can
@@ -419,6 +494,112 @@ test('computeNormals weights each face by its area', () => {
   const normals = computeNormals(positions, indices)
   close(Math.hypot(normals[0]!, normals[1]!, normals[2]!), 1, 1e-5, 'normals should come out unit length')
   assert(Math.abs(normals[1]!) > Math.abs(normals[2]!), 'the larger face should dominate the shared normal')
+})
+
+console.log('\nwavefront obj')
+
+test('parseObj fills in only the normals a file leaves out', () => {
+  // A file can declare normals and still have faces that do not use them.
+  // Those vertices used to ship a zero normal, which shades as unlit black --
+  // a failure that looks like a lighting choice rather than like a bug.
+  const mesh = parseObj(`
+    v 0 0 0
+    v 1 0 0
+    v 1 1 0
+    v 0 1 0
+    vn 0 0 1
+    f 1//1 2//1 3//1
+    f 1 3 4
+  `)
+  for (let i = 0; i < mesh.normals.length; i += 3) {
+    const len = Math.hypot(mesh.normals[i]!, mesh.normals[i + 1]!, mesh.normals[i + 2]!)
+    close(len, 1, 1e-5, `vertex ${i / 3} has no usable normal`)
+  }
+  // The declared normal must survive untouched, not be averaged away.
+  close(mesh.normals[2]!, 1, 1e-6, 'the declared normal was overwritten')
+})
+
+test('parseObj treats two spellings of one vertex as one vertex', () => {
+  const mesh = parseObj(`
+    v 0 0 0
+    v 1 0 0
+    v 1 1 0
+    vt 0 0
+    vn 0 0 1
+    f 1//1 2//1 3//1
+    f 1/1/1 2//1 3//1
+  `)
+  assert(mesh.positions.length / 3 === 3, `expected 3 vertices, got ${mesh.positions.length / 3}`)
+})
+
+test('writeObj and parseObj round-trip a mesh into the same picture', () => {
+  // The strongest statement available about a serializer: the frame drawn
+  // from the reloaded mesh is the frame drawn from the original, cell for
+  // cell. A cube is the case that matters, because its vertices share
+  // positions but not normals -- collapsing those would round the edges off.
+  const original = cube(2)
+  const reloaded = parseObj(writeObj(original, 'cube'))
+
+  assert(
+    reloaded.positions.length === original.positions.length,
+    `vertex count changed: ${original.positions.length / 3} -> ${reloaded.positions.length / 3}`,
+  )
+
+  const camera = new Camera({ position: vec3(2.6, 2.1, 3.6), fovY: Math.PI / 3.2 })
+  const aspect = aspectFor(70, 30, 0.5)
+  const shader = lambert({ albedo: vec3(1, 0.85, 0.6), specular: 0.4, eye: camera.position })
+  const frames = [original, reloaded].map((m) => {
+    const fb = new Framebuffer(70, 30)
+    fb.clear(0, 0, 0)
+    drawMesh(fb, m, rotationY(0.8), camera.viewProjection(aspect), shader)
+    fb.resolve(RAMPS.long)
+    return fb.toString()
+  })
+  assert(frames[0] === frames[1], `the reloaded mesh renders differently:\n${frames[1]}`)
+})
+
+test('boundingBox follows a mesh that is not at the origin', () => {
+  const shifted = cube(2)
+  for (let i = 0; i < shifted.positions.length; i += 3) shifted.positions[i] = shifted.positions[i]! + 5
+
+  const b = boundingBox(shifted)
+  close(b.center.x, 5, 1e-6, 'centre x')
+  close(b.center.y, 0, 1e-6, 'centre y')
+  close(b.radius, Math.sqrt(3), 1e-5, 'radius should be measured from the centre, not the origin')
+  // The origin-relative measure is the one that would mis-frame this mesh.
+  assert(boundingRadius(shifted) > b.radius * 2, 'boundingRadius should be much larger here')
+})
+
+test('the shipped model loads and renders facing the camera', () => {
+  const path = 'models/knot.obj'
+  assert(existsSync(path), `${path} is missing -- run "npm run model"`)
+  const mesh = parseObj(readFileSync(path, 'utf8'))
+
+  assert(mesh.indices.length / 3 > 1000, `expected a few thousand triangles, got ${mesh.indices.length / 3}`)
+  for (let i = 0; i < mesh.normals.length; i += 3) {
+    const len = Math.hypot(mesh.normals[i]!, mesh.normals[i + 1]!, mesh.normals[i + 2]!)
+    assert(len > 0.9, `vertex ${i / 3} of the model has a degenerate normal`)
+  }
+
+  // The same facing measure the built-in meshes are held to, which is what
+  // would catch a winding reversed by the round-trip through the file.
+  const b = boundingBox(mesh)
+  const camera = new Camera({ target: b.center, fovY: Math.PI / 3.2 })
+  const aspect = aspectFor(74, 32, 0.5)
+  camera.orbit(0.7, 0.4, fitDistance(b.radius, camera.fovY, aspect))
+  assertFacesCamera('the model', facingSurvey(mesh, camera, 74, 32))
+
+  const fb = new Framebuffer(74, 32)
+  fb.clear(0, 0, 0)
+  drawMesh(
+    fb,
+    mesh,
+    identity(),
+    camera.viewProjection(aspect),
+    lambert({ albedo: vec3(0.9, 0.78, 0.55), specular: 0.4, shininess: 28, eye: camera.position }),
+  )
+  fb.resolve(RAMPS.long)
+  console.log('\n' + fb.toString() + '\n')
 })
 
 console.log('\nraymarching')

@@ -1,3 +1,5 @@
+import type { Vec3 } from './vec3.ts'
+
 export interface Mesh {
   /** 3 floats per vertex. */
   positions: Float32Array
@@ -171,25 +173,33 @@ export function parseObj(text: string): Mesh {
   const normals: number[] = []
   const indices: number[] = []
   const seen = new Map<string, number>()
-  let sawNormals = false
+  const hasNormal: boolean[] = []
 
   const resolve = (raw: number, count: number): number => (raw < 0 ? count + raw : raw - 1)
 
   const vertexFor = (token: string): number => {
-    const cached = seen.get(token)
-    if (cached !== undefined) return cached
     const parts = token.split('/')
-    const pi = resolve(Number(parts[0]), v.length / 3) * 3
-    positions.push(v[pi] ?? 0, v[pi + 1] ?? 0, v[pi + 2] ?? 0)
-    if (parts[2]) {
-      const ni = resolve(Number(parts[2]), vn.length / 3) * 3
-      normals.push(vn[ni] ?? 0, vn[ni + 1] ?? 0, vn[ni + 2] ?? 0)
-      sawNormals = true
+    const pi = resolve(Number(parts[0]), v.length / 3)
+    const ni = parts[2] ? resolve(Number(parts[2]), vn.length / 3) : -1
+
+    // Keyed on the resolved pair rather than the spelling: `1//1` and `1/1/1`
+    // name the same vertex, and caching the text would make two of it.
+    const key = `${pi}/${ni}`
+    const cached = seen.get(key)
+    if (cached !== undefined) return cached
+
+    const p = pi * 3
+    positions.push(v[p] ?? 0, v[p + 1] ?? 0, v[p + 2] ?? 0)
+    if (ni >= 0) {
+      const n = ni * 3
+      normals.push(vn[n] ?? 0, vn[n + 1] ?? 0, vn[n + 2] ?? 0)
     } else {
       normals.push(0, 0, 0)
     }
+    hasNormal.push(ni >= 0)
+
     const index = positions.length / 3 - 1
-    seen.set(token, index)
+    seen.set(key, index)
     return index
   }
 
@@ -210,7 +220,92 @@ export function parseObj(text: string): Mesh {
 
   const pos = new Float32Array(positions)
   const idx = new Uint32Array(indices)
-  return { positions: pos, indices: idx, normals: sawNormals ? new Float32Array(normals) : computeNormals(pos, idx) }
+  const normal = new Float32Array(normals)
+
+  // A file may declare normals and still leave some faces without them. Those
+  // vertices would otherwise carry a zero normal, which shades as unlit black
+  // rather than as anything obviously broken — so fill in the gaps only, and
+  // leave every normal the file did give exactly as written.
+  if (hasNormal.includes(false)) {
+    const derived = computeNormals(pos, idx)
+    for (let i = 0; i < hasNormal.length; i++) {
+      if (hasNormal[i]) continue
+      normal[i * 3] = derived[i * 3]!
+      normal[i * 3 + 1] = derived[i * 3 + 1]!
+      normal[i * 3 + 2] = derived[i * 3 + 2]!
+    }
+  }
+
+  return { positions: pos, indices: idx, normals: normal }
+}
+
+/**
+ * Serializes a mesh back to Wavefront OBJ with explicit normals.
+ *
+ * Positions and normals are parallel arrays here, so every vertex writes one
+ * `v` and one `vn` at the same index and faces can name them as `i//i`.
+ */
+export function writeObj(mesh: Mesh, name = 'mesh', precision = 6): string {
+  const round = (n: number) => {
+    const r = Number(n.toFixed(precision))
+    return Object.is(r, -0) ? '0' : String(r)
+  }
+  const lines = [`# ${name}`]
+  for (let i = 0; i < mesh.positions.length; i += 3) {
+    lines.push(`v ${round(mesh.positions[i]!)} ${round(mesh.positions[i + 1]!)} ${round(mesh.positions[i + 2]!)}`)
+  }
+  for (let i = 0; i < mesh.normals.length; i += 3) {
+    lines.push(`vn ${round(mesh.normals[i]!)} ${round(mesh.normals[i + 1]!)} ${round(mesh.normals[i + 2]!)}`)
+  }
+  for (let i = 0; i < mesh.indices.length; i += 3) {
+    const a = mesh.indices[i]! + 1
+    const b = mesh.indices[i + 1]! + 1
+    const c = mesh.indices[i + 2]! + 1
+    lines.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`)
+  }
+  return lines.join('\n') + '\n'
+}
+
+export interface Bounds {
+  min: Vec3
+  max: Vec3
+  center: Vec3
+  /** Distance from `center` to the farthest vertex. */
+  radius: number
+}
+
+/**
+ * The box a mesh occupies, and a sphere around its centre.
+ *
+ * `boundingRadius` measures from the origin, which is only useful for a mesh
+ * that was built there. A file off disk may sit anywhere, so framing one means
+ * pointing the camera at its centre and fitting to a radius measured from that
+ * centre, not from wherever the origin happens to be.
+ */
+export function boundingBox(mesh: Mesh): Bounds {
+  const p = mesh.positions
+  if (p.length === 0) {
+    const zero = { x: 0, y: 0, z: 0 }
+    return { min: zero, max: zero, center: zero, radius: 0 }
+  }
+
+  const min = { x: Infinity, y: Infinity, z: Infinity }
+  const max = { x: -Infinity, y: -Infinity, z: -Infinity }
+  for (let i = 0; i < p.length; i += 3) {
+    min.x = Math.min(min.x, p[i]!)
+    min.y = Math.min(min.y, p[i + 1]!)
+    min.z = Math.min(min.z, p[i + 2]!)
+    max.x = Math.max(max.x, p[i]!)
+    max.y = Math.max(max.y, p[i + 1]!)
+    max.z = Math.max(max.z, p[i + 2]!)
+  }
+
+  const center = { x: (min.x + max.x) / 2, y: (min.y + max.y) / 2, z: (min.z + max.z) / 2 }
+  let radius = 0
+  for (let i = 0; i < p.length; i += 3) {
+    radius = Math.max(radius, Math.hypot(p[i]! - center.x, p[i + 1]! - center.y, p[i + 2]! - center.z))
+  }
+  return { min, max, center, radius }
 }
 
 /** Distance from the origin to the farthest vertex — handy for framing a shot. */

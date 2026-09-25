@@ -6,6 +6,8 @@
   "description": "A 3D software renderer whose framebuffer is a grid of characters.",
   "scripts": {
     "demo": "node examples/cube.ts",
+    "obj": "node examples/obj.ts",
+    "model": "node scripts/makemodel.ts",
     "web": "vite",
     "build": "tsc && vite build",
     "check": "tsc && node scripts/check.ts",

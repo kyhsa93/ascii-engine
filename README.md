@@ -14,11 +14,15 @@ there. Two ship with the repo: ANSI escape sequences for a terminal, and a
 
 ```
 npm install
-npm run demo      # terminal: spinning cube, sphere and torus
+npm run demo      # terminal: spinning cube, sphere, torus and a raymarched blend
+npm run obj       # terminal: a Wavefront OBJ off disk
 npm run web       # browser: the same scene in a <pre>
 npm run check     # typecheck + test suite
 npm run viewcheck # build, then drive the browser demo in Chromium
 ```
+
+`npm run obj` takes a path: `node examples/obj.ts your-model.obj`. With none it
+loads `models/knot.obj`, which `npm run model` regenerates.
 
 ## Layout
 
@@ -26,7 +30,7 @@ npm run viewcheck # build, then drive the browser demo in Chromium
 src/core/     the renderer — no terminal, no DOM
   vec3.ts       small vector helpers
   mat4.ts       row-major 4x4 matrices, projection, lookAt, normal matrix
-  mesh.ts       cube / sphere / torus / plane builders, OBJ parser
+  mesh.ts       cube / sphere / torus / plane builders, OBJ reader and writer
   camera.ts     view and projection matrices, cell-aspect correction
   raster.ts     near-plane clipping, perspective divide, scanline fill
   renderer.ts   mesh -> triangles -> rasterizer
@@ -105,6 +109,33 @@ costs 2.1 ms a frame against 0.17 ms for a rasterized cube. Both demos give
 the marcher a shorter step budget than the default — which, measured, buys
 nothing at terminal size and cuts a 163x50 browser frame from 15.8 ms to
 6.7 ms, for a difference of 41 glyphs out of 8150.
+
+## Loading a model
+
+`parseObj` reads the part of Wavefront OBJ that describes geometry — `v`,
+`vn`, and `f` with any of its index spellings, negative indices included — and
+fans polygons into triangles. `writeObj` goes the other way.
+
+```ts
+import { readFileSync } from 'node:fs'
+import { boundingBox, parseObj } from './src/core/mesh.ts'
+
+const mesh = parseObj(readFileSync('models/knot.obj', 'utf8'))
+const bounds = boundingBox(mesh)
+```
+
+A mesh off disk is not the same problem as one from a builder: nothing knows
+how big it is or where it sits. `boundingBox` answers both, and the OBJ demo
+aims the camera at the mesh's own centre and fits to a radius measured from
+there — `boundingRadius`, which measures from the origin, would frame a model
+built somewhere else far too small.
+
+Two details the round-trip test pins down. A cube's vertices share positions
+but not normals, so a reader that merges by position alone rounds its edges
+off; the reader keys on the position/normal pair instead. And a file may
+declare normals and still leave some faces without them — those vertices get
+derived normals, but only those, because a zero normal shades as unlit black
+and reads as a lighting choice rather than as a bug.
 
 ## Writing a shader
 

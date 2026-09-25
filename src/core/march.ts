@@ -37,6 +37,29 @@ export interface MarchOptions {
     /** Defaults to the origin, which is where every primitive here is built. */
     center?: Vec3
   }
+  /**
+   * Field samples per normal: six along the axes, or four off a tetrahedron.
+   *
+   * Once a frame is bounded, the normal is the largest single thing left in
+   * it: measured on the demo shapes, six taps are 18% of a blend's evaluations
+   * and 46% of a sphere's. Dropping two of them takes 6% to 16% off the whole
+   * frame.
+   *
+   * It is not free, and that is why six stays the default. On a smooth surface
+   * the two agree to a fraction of a degree -- 0.066 worst on a sphere, 0.246
+   * on a torus. On a surface with creases they do not: a cube's worst sample
+   * is 36 degrees out, a blend's 28. The tetrahedron's taps are not aligned to
+   * the axes, so near an edge the four of them straddle different faces and
+   * the gradient they agree on belongs to neither.
+   *
+   * What makes four usable anyway is where that error lands. The cube's median
+   * error is exactly zero: the damage is confined to points directly over an
+   * edge, and an edge is thinner than a cell, so few cell centres fall on one.
+   * Rendered, 0.0% to 0.8% of drawn cells pick a different glyph, scattered
+   * over a handful of rows rather than running along an edge. Worth having on
+   * a rounded subject; think twice on a faceted one.
+   */
+  normalTaps?: 4 | 6
 }
 
 // A distance field has no vertices, so it has neither texture coordinates nor
@@ -76,6 +99,7 @@ export function marchScene(
   const maxSteps = options.maxSteps ?? 96
   const epsilon = options.epsilon ?? 1e-3
   const maxDistance = options.maxDistance ?? camera.far
+  const taps = options.normalTaps ?? 6
 
   const forward = normalize(sub(camera.target, camera.position))
   const right = normalize(cross(forward, camera.up))
@@ -159,10 +183,26 @@ export function marchScene(
       // evaluations and are worth it: forward differences bias the normal
       // along the ray, which shows up as a rim of wrong shading on every
       // silhouette.
+      //
+      // Four taps read the same gradient off the corners of a tetrahedron
+      // instead. See `normalTaps` for what that trades away.
       const h = epsilon
-      let nx = field(px + h, py, pz) - field(px - h, py, pz)
-      let ny = field(px, py + h, pz) - field(px, py - h, pz)
-      let nz = field(px, py, pz + h) - field(px, py, pz - h)
+      let nx: number
+      let ny: number
+      let nz: number
+      if (taps === 4) {
+        const d0 = field(px + h, py - h, pz - h)
+        const d1 = field(px - h, py - h, pz + h)
+        const d2 = field(px - h, py + h, pz - h)
+        const d3 = field(px + h, py + h, pz + h)
+        nx = d0 - d1 - d2 + d3
+        ny = -d0 - d1 + d2 + d3
+        nz = -d0 + d1 - d2 + d3
+      } else {
+        nx = field(px + h, py, pz) - field(px - h, py, pz)
+        ny = field(px, py + h, pz) - field(px, py - h, pz)
+        nz = field(px, py, pz + h) - field(px, py, pz - h)
+      }
       const nlen = Math.hypot(nx, ny, nz) || 1
       nx /= nlen
       ny /= nlen

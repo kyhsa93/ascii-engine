@@ -489,6 +489,38 @@ that are right there are wrong here.
   shadow loses the rim of its umbra, which is the same trap as bounding a unit
   sphere at exactly 1 in the marcher.
 
+## Normal taps
+
+`marchScene` estimates a normal by sampling the field around the hit. Six taps
+along the axes is the default; `normalTaps: 4` reads the same gradient off the
+corners of a tetrahedron instead.
+
+```ts
+marchScene(target, field, camera, aspect, shader, {
+  bounds: { radius: subject.radius + 0.05 },
+  normalTaps: 4,
+})
+```
+
+It is worth an option because, once a frame is bounded, the normal is the
+largest single thing left in it. Measured on the demo shapes, six taps are 18%
+of a blend's field evaluations and 46% of a sphere's; dropping two takes 6% to
+16% off the whole frame.
+
+**Six is still the default**, because the cheaper estimate is not cheaper
+everywhere. On a smooth surface the two are indistinguishable — 0.066 degrees
+worst on a sphere, 0.246 on a torus. On a creased one they are not: a cube's
+worst sample is 36 degrees out, a blend's 28. The tetrahedron's taps are not
+aligned to the axes, so near an edge the four of them straddle different faces
+and agree on a gradient belonging to neither.
+
+What makes four usable anyway is *where* that error lands. A cube's median
+error is exactly zero — the damage sits on points directly over an edge, and an
+edge is thinner than a cell, so few cell centres land on one. Rendered, 0.0% to
+0.8% of drawn cells pick a different glyph, scattered across a handful of rows
+rather than running along an edge. Turn it on for a rounded subject; think
+twice on a faceted one.
+
 ## Writing a shader
 
 A shader is a plain function. It is handed the interpolated fragment and a

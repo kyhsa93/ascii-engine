@@ -41,13 +41,13 @@ import { drawAxes, drawLine3, drawText, label3 } from '../src/core/overlay.ts'
 import { RAMPS } from '../src/core/ramp.ts'
 import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
-import { sdBox, sdSphere, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
+import { sdBox, sdSphere, sdTorus, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { shadowFrom, shadowFromPoint } from '../src/core/shadow.ts'
 import { lambert, unlit, wireframe } from '../src/core/shading.ts'
 import { Supersampler } from '../src/core/supersample.ts'
 import { checker, fromAscii, parsePpm, sample, texture, writePpm } from '../src/core/texture.ts'
 import { Terminal, to256 } from '../src/term/ansi.ts'
-import { cross, normalize, sub, vec3 } from '../src/core/vec3.ts'
+import { cross, normalize, sub, vec3, type Vec3 } from '../src/core/vec3.ts'
 
 let failed = 0
 
@@ -1237,6 +1237,143 @@ test('a bound the camera cannot see costs no samples whatsoever', () => {
   })
   assert(evals === 0, `expected no field evaluations for a subject behind the camera, got ${evals}`)
   assert(coverage(fb) === 0, 'something was drawn for a subject behind the camera')
+})
+
+console.log('\nnormal taps')
+
+/**
+ * A light for this section alone.
+ *
+ * Not the shadow section's `SHADOW_LIGHT`: that is declared below these checks
+ * and a `const` read before its declaration throws rather than reading as
+ * undefined. Borrowing a constant across sections couples their order for no
+ * benefit, so this one is local.
+ */
+const TAP_LIGHT = vec3(0.55, 0.75, 0.6)
+
+/** The angle between two unit vectors, in degrees. */
+function angleBetween(a: Vec3, b: Vec3): number {
+  const dot = Math.min(1, Math.max(-1, a.x * b.x + a.y * b.y + a.z * b.z))
+  return (Math.acos(dot) * 180) / Math.PI
+}
+
+/** Marches a field and hands back every normal the renderer produced. */
+function normalsOf(field: Sdf, radius: number, taps: 4 | 6): Map<number, Vec3> {
+  const out = new Map<number, Vec3>()
+  const aspect = aspectFor(70, 34, 0.5)
+  const camera = new Camera({ position: vec3(0, 0, 5), fovY: Math.PI / 3.2 })
+  camera.orbit(-0.6, 0.35, fitDistance(radius, camera.fovY, aspect))
+  const fb = new Framebuffer(70, 34)
+  fb.clear()
+  const record: Shader = (f, o) => {
+    out.set(f.cy * 70 + f.cx, vec3(f.nx, f.ny, f.nz))
+    o.r = 1
+    o.g = 1
+    o.b = 1
+  }
+  marchScene(fb, field, camera, aspect, record, {
+    maxSteps: 64,
+    epsilon: 3e-3,
+    bounds: { radius: radius + 0.05 },
+    normalTaps: taps,
+  })
+  return out
+}
+
+const SMOOTH: [string, number, Sdf][] = [
+  ['sphere', 1.3, sdSphere(1.3)],
+  ['torus', 1.52, sdTorus(1.1, 0.42)],
+]
+const CREASED: [string, number, Sdf][] = [['cube', 1.74, sdBox(1, 1, 1)]]
+
+test('four taps give a unit normal pointing out of the surface', () => {
+  // The same bar the six-tap normal is held to. A cheaper gradient is still a
+  // gradient or it is not usable at all, whatever it costs.
+  const bad: string[] = []
+  for (const [name, radius, field] of [...SMOOTH, ...CREASED]) {
+    for (const [, n] of normalsOf(field, radius, 4)) {
+      const len = Math.hypot(n.x, n.y, n.z)
+      if (Math.abs(len - 1) > 1e-6) {
+        bad.push(`${name} normal of length ${len.toFixed(6)}`)
+        break
+      }
+    }
+  }
+  assert(bad.length === 0, bad.join(', '))
+})
+
+test('on a smooth surface four taps and six agree to under a degree', () => {
+  // Where the cheaper normal is meant to be used, it has to be indistinguishable
+  // rather than merely close: a degree of tilt is a whole shade on a ten-level
+  // ramp at a grazing angle.
+  const drift: string[] = []
+  for (const [name, radius, field] of SMOOTH) {
+    const six = normalsOf(field, radius, 6)
+    const four = normalsOf(field, radius, 4)
+    let worst = 0
+    for (const [cell, a] of six) {
+      const b = four.get(cell)
+      if (b) worst = Math.max(worst, angleBetween(a, b))
+    }
+    if (worst >= 1) drift.push(`${name} by ${worst.toFixed(3)} degrees`)
+  }
+  assert(drift.length === 0, `four taps drifted: ${drift.join(', ')}`)
+})
+
+test('on a creased surface they do not, and that is the cost of the option', () => {
+  // The falsification for the check above, and the reason six stays the
+  // default. The tetrahedron's taps are not axis-aligned, so at an edge the
+  // four of them straddle different faces. Measured over surface points, a
+  // cube's worst sample is 36 degrees out -- if this ever stops being true,
+  // either the estimator changed or the check is no longer reaching an edge.
+  let worst = 0
+  for (const [, radius, field] of CREASED) {
+    const six = normalsOf(field, radius, 6)
+    const four = normalsOf(field, radius, 4)
+    for (const [cell, a] of six) {
+      const b = four.get(cell)
+      if (b) worst = Math.max(worst, angleBetween(a, b))
+    }
+  }
+  assert(worst > 1, `a cube's four-tap normals stayed within ${worst.toFixed(3)} degrees of the six-tap ones`)
+})
+
+test('the cheaper normal moves under one cell in a hundred', () => {
+  // Degrees are not what anyone sees; glyphs are. The creased case is the one
+  // that matters here, because its angular error is the large one -- and it
+  // lands almost entirely on points directly over an edge, which is thinner
+  // than a cell. Measured, 0.0% to 0.8% of drawn cells change.
+  const loud: string[] = []
+  for (const [name, radius, field] of [...SMOOTH, ...CREASED]) {
+    const aspect = aspectFor(70, 34, 0.5)
+    const camera = new Camera({ position: vec3(0, 0, 5), fovY: Math.PI / 3.2 })
+    camera.orbit(-0.6, 0.35, fitDistance(radius, camera.fovY, aspect))
+    const shade = lambert({ albedo: vec3(0.95, 0.75, 0.45), light: TAP_LIGHT, ambient: 0.1 })
+
+    const render = (taps: 4 | 6) => {
+      const fb = new Framebuffer(70, 34)
+      fb.clear()
+      marchScene(fb, field, camera, aspect, shade, {
+        maxSteps: 64,
+        epsilon: 3e-3,
+        bounds: { radius: radius + 0.05 },
+        normalTaps: taps,
+      })
+      fb.resolve(RAMPS.short)
+      return fb
+    }
+    const a = render(6)
+    const b = render(4)
+    let drawn = 0
+    let differ = 0
+    for (let i = 0; i < a.depth.length; i++) {
+      if (a.depth[i]! <= 0) continue
+      drawn++
+      if (a.chars[i] !== b.chars[i]) differ++
+    }
+    if (differ / drawn > 0.01) loud.push(`${name} ${((differ / drawn) * 100).toFixed(1)}%`)
+  }
+  assert(loud.length === 0, `four taps changed too much of the picture: ${loud.join(', ')}`)
 })
 
 console.log('\nshadows')

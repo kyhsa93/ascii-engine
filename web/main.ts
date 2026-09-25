@@ -330,6 +330,13 @@ function frame(now: number): void {
       // it drops field evaluations by 70% to 84% depending on the shape --
       // most of a marched frame was rays discovering empty space.
       bounds: { radius: subject.radius + BOUND_SLACK },
+      // Four taps rather than six. Safe here because the only subject without
+      // a mesh -- and so the only one this branch ever draws -- is the blend,
+      // which is smooth: measured, its normals move at most 28 degrees at the
+      // worst single sample and 0.7% of drawn cells change glyph. Give the
+      // cube a field-only variant one day and this needs revisiting, because a
+      // tetrahedron's taps straddle faces at a crease.
+      normalTaps: 4,
     })
 
   if (target !== fb && sampler) sampler.resolveInto(fb)

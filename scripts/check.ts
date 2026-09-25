@@ -41,6 +41,7 @@ import { RAMPS } from '../src/core/ramp.ts'
 import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { sdBox, sdSphere, smoothUnion, translate } from '../src/core/sdf.ts'
+import { shadowFrom } from '../src/core/shadow.ts'
 import { lambert, unlit } from '../src/core/shading.ts'
 import { checker, fromAscii, parsePpm, sample, texture, writePpm } from '../src/core/texture.ts'
 import { Terminal, to256 } from '../src/term/ansi.ts'
@@ -1031,6 +1032,184 @@ test('a marched scene renders a gradient over its blend', () => {
   const glyphs = new Set<number>()
   for (let i = 0; i < fb.chars.length; i++) if (fb.depth[i]! > 0) glyphs.add(fb.chars[i]!)
   assert(glyphs.size >= 8, `expected a smooth gradient, got ${glyphs.size} distinct glyphs`)
+  console.log('\n' + fb.toString() + '\n')
+})
+
+console.log('\nshadows')
+
+const SHADOW_LIGHT = vec3(0.55, 0.75, 0.6)
+
+test('the marched shadow agrees with the exact one, fragment by fragment', () => {
+  // A sphere is one of the few casters whose shadow has a closed form: the ray
+  // from a floor point toward the light is blocked exactly when it passes
+  // within the radius. So this is a comparison against arithmetic the marcher
+  // takes no part in — not against a picture, and not against a centroid,
+  // which a shadow of the right size in the wrong shape would also satisfy.
+  const radius = 1.3
+  const l = normalize(SHADOW_LIGHT)
+  const blocked = (px: number, py: number, pz: number): boolean => {
+    const b = px * l.x + py * l.y + pz * l.z
+    const c = px * px + py * py + pz * pz - radius * radius
+    if (c <= 0) return true
+    if (b >= 0) return false
+    return b * b - c >= 0
+  }
+
+  const hard = shadowFrom(sdSphere(radius), {
+    light: SHADOW_LIGHT,
+    bias: 0.03,
+    epsilon: 2e-3,
+    maxDistance: 12,
+  })
+
+  // The rasterizer is here only to hand over a spread of floor positions.
+  const samples: Sample[] = []
+  const fb = new Framebuffer(120, 40)
+  fb.clear()
+  const camera = new Camera({ position: vec3(-1.6, 1.04, 2.35), fovY: Math.PI / 3.2 })
+  drawMesh(
+    fb,
+    plane(40, 1),
+    translation(0, -radius - 0.2, 0),
+    camera.viewProjection(aspectFor(120, 40, 0.574)),
+    recorder(samples),
+  )
+  assert(samples.length > 1500, `expected a lot of floor, got ${samples.length} fragments`)
+
+  let inShadow = 0
+  let disagree = 0
+  let worst = 0
+  for (const s of samples) {
+    const exact = blocked(s.px, s.py, s.pz)
+    if (exact) inShadow++
+    if ((hard(s.px, s.py, s.pz) === 0) === exact) continue
+    disagree++
+    // A fragment that disagrees should be sitting on the silhouette, where a
+    // whisker either way decides it. One sitting anywhere else is a bug.
+    const b = s.px * l.x + s.py * l.y + s.pz * l.z
+    const perpendicular = Math.sqrt(Math.max(0, s.px * s.px + s.py * s.py + s.pz * s.pz - b * b))
+    worst = Math.max(worst, Math.abs(perpendicular - radius))
+  }
+
+  assert(inShadow > 200, `the shot holds almost no shadow to compare: ${inShadow} fragments`)
+  assert(
+    disagree / samples.length < 0.005,
+    `${disagree} of ${samples.length} fragments disagree with the exact answer`,
+  )
+  assert(worst < 0.01, `a disagreement sits ${worst.toFixed(4)} units off the silhouette rather than on it`)
+})
+
+test('an occluder out of the way leaves the floor exactly as it was', () => {
+  // No false shadows: a shadow function that dims a little everywhere would
+  // pass a "the shadow is roughly here" test and fail this one.
+  const camera = new Camera({ position: vec3(0, 6, 7), fovY: Math.PI / 3 })
+  const vp = camera.viewProjection(aspectFor(50, 25, 0.5))
+  const far = shadowFrom(translate(sdSphere(1), 0, 1.5, -400), { light: SHADOW_LIGHT })
+
+  const render = (shadow?: ReturnType<typeof shadowFrom>) => {
+    const fb = new Framebuffer(50, 25)
+    fb.clear()
+    drawMesh(
+      fb,
+      plane(20, 1),
+      identity(),
+      vp,
+      lambert({ albedo: vec3(0.5, 0.5, 0.6), light: SHADOW_LIGHT, ambient: 0.15, ...(shadow ? { shadow } : {}) }),
+    )
+    return fb
+  }
+
+  const plain = render()
+  const shadowed = render(far)
+  assert(coverage(plain) > 400, `expected a floor to compare, got ${coverage(plain)} cells`)
+  assert(
+    plain.color.every((v, i) => v === shadowed.color[i]),
+    'an occluder four hundred units away changed the picture',
+  )
+})
+
+test('a lit surface does not shadow itself, and its far side does', () => {
+  // Without the starting bias the first sample sits on the caster, where the
+  // field is zero, and every lit surface reports itself as blocked.
+  const occlusion = shadowFrom(sdSphere(1), { light: SHADOW_LIGHT })
+  const l = normalize(SHADOW_LIGHT)
+  assert(occlusion(l.x, l.y, l.z) > 0.9, 'the point facing the light is shadowing itself')
+  assert(occlusion(-l.x, -l.y, -l.z) === 0, 'the far side of the sphere should be in its own shadow')
+})
+
+test('softness turns a hard edge into a penumbra', () => {
+  // Walking across the shadow boundary on the floor. A hard shadow answers
+  // only 0 or 1 anywhere along that line; a soft one has to produce values in
+  // between, or the softness parameter is decoration.
+  const field = translate(sdSphere(1), 0, 1.5, 0)
+  const hard = shadowFrom(field, { light: SHADOW_LIGHT })
+  const soft = shadowFrom(field, { light: SHADOW_LIGHT, softness: 8 })
+
+  const hardValues = new Set<number>()
+  const softValues: number[] = []
+  for (let i = 0; i <= 40; i++) {
+    const x = -2.6 + (i / 40) * 3
+    hardValues.add(hard(x, 0, -1.2))
+    softValues.push(soft(x, 0, -1.2))
+  }
+
+  assert(hardValues.size === 2, `a hard shadow should be all or nothing, got ${[...hardValues].join(', ')}`)
+  for (const v of softValues) assert(v >= 0 && v <= 1, `visibility outside 0..1: ${v}`)
+  const partial = softValues.filter((v) => v > 0.02 && v < 0.98)
+  assert(partial.length >= 3, `expected a penumbra, got ${partial.length} partial values`)
+})
+
+test('a shadow dims the light but never the ambient', () => {
+  // The rule that keeps a shadow from being a hole in the picture, checked by
+  // driving the shader directly at a point known to be fully occluded.
+  const albedo = vec3(0.6, 0.5, 0.4)
+  const ambient = 0.2
+  const shader = lambert({
+    albedo,
+    light: SHADOW_LIGHT,
+    ambient,
+    shadow: shadowFrom(translate(sdSphere(1), 0, 1.5, 0), { light: SHADOW_LIGHT }),
+  })
+
+  const frag = { px: -1.1, py: 0, pz: -1.2, nx: 0, ny: 1, nz: 0, u: 0, v: 0, cx: 0, cy: 0, invW: 1 }
+  const out = { r: 0, g: 0, b: 0, char: 0 }
+  shader(frag, out)
+
+  close(out.r, albedo.x * ambient, 1e-6, 'a fully shadowed point should keep exactly its ambient')
+  close(out.g, albedo.y * ambient, 1e-6, 'a fully shadowed point should keep exactly its ambient')
+  close(out.b, albedo.z * ambient, 1e-6, 'a fully shadowed point should keep exactly its ambient')
+  assert(out.r > 0, 'a shadow that reaches zero is a hole, not a shadow')
+})
+
+test('a floor of triangles takes a shadow from a field', () => {
+  // The whole point of shadowing by position: the floor is rasterized, the
+  // caster is a distance field, and the two paths share nothing else.
+  const camera = new Camera({ position: vec3(0, 5, 8), fovY: Math.PI / 3 })
+  const aspect = aspectFor(78, 30, 0.5)
+  const field = translate(sdSphere(1.1), 0, 1.6, 0)
+  const occlusion = shadowFrom(field, { light: SHADOW_LIGHT, softness: 10 })
+
+  const fb = new Framebuffer(78, 30)
+  fb.clear(0, 0, 0)
+  drawMesh(
+    fb,
+    plane(24, 1),
+    identity(),
+    camera.viewProjection(aspect),
+    lambert({ albedo: vec3(0.55, 0.57, 0.62), light: SHADOW_LIGHT, ambient: 0.18, shadow: occlusion }),
+  )
+  marchScene(
+    fb,
+    field,
+    camera,
+    aspect,
+    lambert({ albedo: vec3(0.95, 0.8, 0.55), light: SHADOW_LIGHT, ambient: 0.12, specular: 0.4, eye: camera.position }),
+  )
+  fb.resolve(RAMPS.long)
+
+  const glyphs = new Set<number>()
+  for (let i = 0; i < fb.chars.length; i++) if (fb.depth[i]! > 0) glyphs.add(fb.chars[i]!)
+  assert(glyphs.size >= 6, `expected floor, shadow and ball to separate, got ${glyphs.size} glyphs`)
   console.log('\n' + fb.toString() + '\n')
 })
 

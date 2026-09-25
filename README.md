@@ -37,6 +37,7 @@ src/core/     the renderer — no terminal, no DOM
   sdf.ts        signed distance primitives and the operations that combine them
   march.ts      distance field -> rays -> the same framebuffer
   texture.ts    sampling with wrap and filter modes, checker, ASCII art, PPM
+  shadow.ts     a second march, toward the light
   shading.ts    Lambert + Blinn-Phong, normal debug view
   framebuffer.ts  the character grid, and luminance -> glyph resolution
   ramp.ts       character ramps
@@ -174,6 +175,56 @@ Three details the tests hold shut:
   reader and writer each flip, and a flip applied once rather than twice
   survives every other test and shows up only as an upside-down picture.
 
+## Shadows
+
+A shadow is the same march again, from the surface toward the light: if
+anything is in the way, the point is dark. `shadowFrom` returns a function of
+position, and `lambert` takes it as `shadow`.
+
+```ts
+import { shadowFrom } from './src/core/shadow.ts'
+
+const occlusion = shadowFrom(field, { light, softness: 12 })
+drawMesh(fb, floor, identity(), vp, lambert({ light, shadow: occlusion }))
+```
+
+Because the answer needs only a *position*, this reaches across the two render
+paths: the floor in the demo is triangles, and what darkens it is a distance
+field it has nothing else to do with. The limit is the other direction — an
+occluder has to be a field, since casting from a mesh would need a
+ray-triangle structure this renderer does not have. So every demo subject
+carries a field as well as a mesh, and the two have to describe the same
+shape in the same pose or the shadow drifts away from the thing casting it.
+
+The marching itself is held against arithmetic rather than against a picture.
+A sphere's shadow has a closed form — the ray from a floor point toward the
+light is blocked exactly when it passes within the radius — so `npm run check`
+asks both and requires every floor fragment in the shot to agree, bar the
+handful sitting on the silhouette where a whisker either way decides it.
+
+Three things that are easy to get wrong here:
+
+- **Ambient is not shadowed.** It stands for light arriving from everywhere
+  else; scaling it too turns every shadow into a black hole.
+- **The ray starts at a bias, not at zero.** A point on the caster is by
+  definition at distance zero from the field, so an unbiased ray reports a hit
+  immediately and the whole object goes black.
+- **Softness comes free from the march.** Tracking the closest the ray came to
+  a surface, measured against how far it had travelled to get there, gives a
+  penumbra without a second pass: graze an edge from far away and you are
+  barely dimmed, graze it from close up and you are nearly blocked.
+- **The umbra has to clear the ramp's first glyph.** This one only bites a
+  renderer made of characters. A shadow whose luminance rounds to index zero
+  is drawn in spaces, and a shadow made of spaces does not read as a dark
+  patch — it reads as a hole where the floor ran out. Measured on the demo's
+  first floor: 334 of its 336 umbra cells came out blank. Raising the floor's
+  albedo and ambient put every one of them on a glyph instead.
+- **A light behind the camera hides every shadow it casts.** Not a bug, just
+  geometry: the shadow falls exactly where the caster already covers the
+  screen. The demo opens from the other side for that reason — measured on the
+  sphere, no shadowed floor cell at all is visible from the old default view
+  and 381 are from the new one, and raising the camera does not rescue it.
+
 ## Writing a shader
 
 A shader is a plain function. It is handed the interpolated fragment and a
@@ -225,6 +276,7 @@ Terminal and browser share the same scene.
 | `space` | cycle cube / sphere / torus / blend (the raymarched one) |
 | `r` | cycle character ramp |
 | `t` | toggle the checker map (meshes only — a field has no uv) |
+| `s` | toggle the floor and its shadow |
 | `n` | toggle the normal debug view |
 | `p` | pause the spin |
 | arrows | orbit the camera |

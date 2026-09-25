@@ -221,6 +221,37 @@ try {
     assert(mapped.glyphs >= 5, `the mapped sphere lost its gradient: ${mapped.glyphs} glyphs`)
   })
 
+  // Still paused, so once again the button is the only thing that can have
+  // changed the frame. The floor is what makes this worth checking in a
+  // browser at all: it is triangles, and what darkens it is a distance field,
+  // so this is the one assertion that watches a shadow cross between the two
+  // render paths in the page that actually ships.
+  await page.click('button[data-action="shadow"]')
+  await page.waitForTimeout(350)
+  const grounded = await readScreen(page)
+
+  await page.waitForTimeout(400)
+  const stillRunning = await readScreen(page)
+
+  check('the shadow button puts a floor under the subject', () => {
+    // What this can honestly claim is that the page took the extra work: a
+    // floor appeared, nothing threw, and frames kept coming. Whether the
+    // shadow lands in the right place is settled in `npm run check`, against
+    // a line computed outside the renderer — a browser can only show that the
+    // picture changed, which is a much weaker thing to know.
+    assert(grounded.digest !== mapped.digest, 'the frame did not change when shadows were switched on')
+    assert(
+      grounded.maxY >= grounded.rows - 1,
+      `expected a floor reaching the bottom row, drawn content stops at row ${grounded.maxY} of ${grounded.rows}`,
+    )
+    assert(grounded.glyphs >= 5, `the floor flattened the frame to ${grounded.glyphs} glyphs`)
+    assert(problems.length === 0, `the shadow path threw: ${problems.join(' | ')}`)
+    assert(
+      stillRunning.frames > grounded.frames,
+      `frames stopped after switching shadows on, stuck at ${grounded.frames}`,
+    )
+  })
+
   await page.screenshot({ path: join(SHOTS, 'desktop.png') })
 
   const phone = await context.newPage()

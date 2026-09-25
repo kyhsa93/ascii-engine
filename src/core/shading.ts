@@ -1,4 +1,5 @@
 import type { Shader } from './raster.ts'
+import type { Occlusion } from './shadow.ts'
 import type { Texture } from './texture.ts'
 import { sample } from './texture.ts'
 import type { Vec3 } from './vec3.ts'
@@ -8,6 +9,12 @@ export interface LambertOptions {
   albedo?: Vec3
   /** Multiplied into the albedo, read at the fragment's texture coordinates. */
   map?: Texture
+  /**
+   * How much of the light reaches each point. Scales the diffuse and specular
+   * terms but never the ambient one — ambient is the light that arrives from
+   * everywhere else, and dimming it too turns every shadow into a black hole.
+   */
+  shadow?: Occlusion
   /** Direction from the surface *toward* the light. Normalized on the way in. */
   light?: Vec3
   lightColor?: Vec3
@@ -30,6 +37,7 @@ export function lambert(options: LambertOptions = {}): Shader {
   const shininess = options.shininess ?? 32
   const eye = options.eye ?? vec3(0, 0, 0)
   const map = options.map
+  const shadow = options.shadow
   const texel = new Float32Array(3)
 
   return (f, out) => {
@@ -68,9 +76,15 @@ export function lambert(options: LambertOptions = {}): Shader {
       ab *= texel[2]!
     }
 
-    out.r = Math.min(1, ar * (ambient + diffuse * lightColor.x) + spec)
-    out.g = Math.min(1, ag * (ambient + diffuse * lightColor.y) + spec)
-    out.b = Math.min(1, ab * (ambient + diffuse * lightColor.z) + spec)
+    // A surface already turned away from the light cannot be shadowed further,
+    // and asking would cost a whole second march per cell to learn nothing.
+    const lit = shadow && diffuse > 0 ? shadow(f.px, f.py, f.pz) : 1
+    const d = diffuse * lit
+    spec *= lit
+
+    out.r = Math.min(1, ar * (ambient + d * lightColor.x) + spec)
+    out.g = Math.min(1, ag * (ambient + d * lightColor.y) + spec)
+    out.b = Math.min(1, ab * (ambient + d * lightColor.z) + spec)
   }
 }
 

@@ -1,19 +1,46 @@
 import { Camera, aspectFor, fitDistance } from '../src/core/camera.ts'
-import { multiply, rotationX, rotationY } from '../src/core/mat4.ts'
+import { multiply, rotationX, rotationY, translation } from '../src/core/mat4.ts'
 import { marchScene } from '../src/core/march.ts'
-import { boundingRadius, cube, sphere, torus, type Mesh } from '../src/core/mesh.ts'
+import { boundingRadius, cube, plane, sphere, torus, type Mesh } from '../src/core/mesh.ts'
 import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
-import { rotateY, sdBox, sdSphere, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
+import { rotateX, rotateY, sdBox, sdSphere, sdTorus, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
+import { shadowFrom } from '../src/core/shadow.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
 import { checker } from '../src/core/texture.ts'
 import { vec3 } from '../src/core/vec3.ts'
 import { Terminal, runLoop } from '../src/term/ansi.ts'
 
-/** Something to look at: either triangles or a distance field. */
-type Subject =
-  | { name: string; radius: number; mesh: Mesh }
-  | { name: string; radius: number; field: (spin: number) => Sdf }
+/**
+ * Something to look at. `mesh` is what gets drawn when there is one; `field`
+ * is the same shape written as a distance function.
+ *
+ * Every subject carries a field whether or not it is drawn as one, because a
+ * rasterized triangle cannot cast a shadow — the occluder always has to be
+ * something a ray can be marched through.
+ */
+interface Subject {
+  name: string
+  radius: number
+  mesh?: Mesh
+  field: (spin: number) => Sdf
+}
+
+/**
+ * The spin, as a field.
+ *
+ * A mesh turns by a model matrix and a field turns by being sampled in a
+ * rotated frame, and the two have to agree or the shadow drifts away from the
+ * thing casting it. `Ry(s) * Rx(0.6s)` inverts to sampling at
+ * `Rx(-0.6s) * Ry(-s)`, which is what nesting these the other way round does.
+ */
+const turned = (base: Sdf, spin: number): Sdf => rotateY(rotateX(base, spin * 0.6), spin)
+
+/** One light for both the shading and the shadow; two would disagree. */
+const LIGHT = vec3(0.55, 0.75, 0.6)
+
+/** Something for the shadow to fall on. Only drawn when shadows are on. */
+const FLOOR = plane(40, 1)
 
 /**
  * A shorter step budget than the default, shared with the browser demo so the
@@ -27,9 +54,9 @@ type Subject =
 const MARCH = { maxSteps: 64, epsilon: 3e-3 }
 
 const shapes: Subject[] = [
-  { name: 'cube', radius: boundingRadius(cube(2)), mesh: cube(2) },
-  { name: 'sphere', radius: 1.3, mesh: sphere(1.3) },
-  { name: 'torus', radius: 1.52, mesh: torus(1.1, 0.42) },
+  { name: 'cube', radius: boundingRadius(cube(2)), mesh: cube(2), field: (s) => turned(sdBox(1, 1, 1), s) },
+  { name: 'sphere', radius: 1.3, mesh: sphere(1.3), field: () => sdSphere(1.3) },
+  { name: 'torus', radius: 1.52, mesh: torus(1.1, 0.42), field: (s) => turned(sdTorus(1.1, 0.42), s) },
   {
     // A sphere and a box welded by a fillet that belongs to neither of them.
     // There is no mesh for this shape: it exists only as a function.
@@ -49,7 +76,10 @@ const camera = new Camera({ position: vec3(0, 0, 5), fovY: Math.PI / 3.2 })
 
 let shape = 0
 let rampIndex = 0
-let yaw = 0.6
+// The light comes from +x +y +z, so a camera on that same side puts it behind
+// the viewer and every shadow hides behind the thing casting it. Measured on
+// the sphere: nought shadowed floor cells visible from yaw 0.6, 381 from here.
+let yaw = -0.6
 let pitch = 0.35
 // A multiplier on the distance that frames the subject, not a distance: the
 // grid can be any shape, and what "close enough" means depends on its shape.
@@ -57,6 +87,7 @@ let zoom = 1
 let spinning = true
 let showNormals = false
 let textured = false
+let shadows = false
 let spin = 0
 
 term.enter()
@@ -76,6 +107,9 @@ term.onKey((key) => {
       break
     case 't':
       textured = !textured
+      break
+    case 's':
+      shadows = !shadows
       break
     case 'n':
       showNormals = !showNormals
@@ -117,24 +151,52 @@ const loop = runLoop((dt) => {
   const vp = camera.viewProjection(aspect)
   const model = multiply(rotationY(spin), rotationX(spin * 0.6))
 
+  const occlusion = shadows
+    ? shadowFrom(subject.field(spin), {
+        light: LIGHT,
+        softness: 12,
+        bias: 0.03,
+        epsilon: 2e-3,
+        maxSteps: 32,
+        maxDistance: 12,
+      })
+    : undefined
+
   const shader = showNormals
     ? normalColor()
     : lambert({
         albedo: vec3(0.95, 0.75, 0.45),
-        light: vec3(0.55, 0.75, 0.6),
+        light: LIGHT,
         ambient: 0.1,
         specular: 0.45,
         shininess: 24,
         eye: camera.position,
         // A distance field has no vertices and so no texture coordinates:
         // every fragment of one reads (0, 0). The map is offered to meshes only.
-        ...(textured && 'mesh' in subject ? { map: MAP } : {}),
+        ...(textured && subject.mesh ? { map: MAP } : {}),
+        ...(occlusion ? { shadow: occlusion } : {}),
       })
+
+  if (occlusion) {
+    // The floor is triangles and what darkens it is a field: the occluder
+    // never has to be the thing being drawn.
+    drawMesh(
+      fb,
+      FLOOR,
+      translation(0, -subject.radius - 0.2, 0),
+      vp,
+      // Deliberately not a dark floor. Darker, and the shadow's core lands on
+      // the ramp's first glyph, which is a space -- and a shadow made of
+      // spaces stops reading as a dark patch and starts reading as a hole
+      // where the floor ran out.
+      lambert({ albedo: vec3(0.5, 0.52, 0.58), light: LIGHT, ambient: 0.22, shadow: occlusion }),
+    )
+  }
 
   // Two paths into one framebuffer. The mesh turns by a model matrix; the
   // field has no vertices to move, so it turns by being sampled in a rotated
   // frame instead.
-  if ('mesh' in subject) drawMesh(fb, subject.mesh, model, vp, shader)
+  if (subject.mesh) drawMesh(fb, subject.mesh, model, vp, shader)
   else marchScene(fb, subject.field(spin), camera, aspect, shader, MARCH)
 
   fb.resolve(RAMPS[rampNames[rampIndex]!])
@@ -142,6 +204,6 @@ const loop = runLoop((dt) => {
 
   term.status(
     `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height} · ${loop.fps.toFixed(0)} fps` +
-      '   [space] shape  [r] ramp  [t] texture  [n] normals  [p] pause  [arrows] orbit  [q] quit',
+      '   [space] shape  [r] ramp  [t] texture  [s] shadow  [n] normals  [p] pause  [q] quit',
   )
 }, 60)

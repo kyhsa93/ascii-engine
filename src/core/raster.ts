@@ -36,6 +36,16 @@ export interface Fragment {
   /** Texture coordinates. Zero on a mesh that carries none. */
   u: number
   v: number
+  /**
+   * Distance in cells to the nearest edge of the triangle being drawn.
+   *
+   * In cells rather than in barycentrics on purpose: a barycentric threshold
+   * draws a wire that thins as its triangle grows on screen, which is the
+   * usual way this is done and the usual way it looks wrong. Note the edges
+   * are the *triangle's*, so a quad shows its diagonal and a triangle cut by
+   * the near plane shows the cut.
+   */
+  edge: number
   /** Cell coordinates within the target. */
   cx: number
   cy: number
@@ -62,7 +72,14 @@ const clipIn = new Float32Array(8 * CLIP_STRIDE)
 const clipOut = new Float32Array(8 * CLIP_STRIDE)
 const screen = new Float32Array(8 * SCREEN_STRIDE)
 
-const frag: Fragment = { px: 0, py: 0, pz: 0, nx: 0, ny: 0, nz: 0, u: 0, v: 0, cx: 0, cy: 0, invW: 0 }
+const frag: Fragment = {
+  px: 0, py: 0, pz: 0,
+  nx: 0, ny: 0, nz: 0,
+  u: 0, v: 0,
+  edge: 0,
+  cx: 0, cy: 0,
+  invW: 0,
+}
 const surf: Surface = { r: 0, g: 0, b: 0, char: 0 }
 
 /**
@@ -126,6 +143,16 @@ function rasterize(
   if (minX > maxX || minY > maxY) return
 
   const invArea = 1 / area
+
+  // An edge function is the perpendicular distance to that edge times the
+  // edge's own length, so dividing the area by each length converts the
+  // barycentrics back into distances in cells. All three are constant across
+  // the triangle, which is what makes the per-fragment cost three multiplies.
+  const absArea = Math.abs(area)
+  const k0 = absArea / Math.hypot(cx - bx, cy - by)
+  const k1 = absArea / Math.hypot(ax - cx, ay - cy)
+  const k2 = absArea / Math.hypot(bx - ax, by - ay)
+
   const chars = target.chars
   const color = target.color
   const depth = target.depth
@@ -161,6 +188,7 @@ function rasterize(
       frag.nz = (l0 * screen[a + 8]! + l1 * screen[b + 8]! + l2 * screen[c + 8]!) * w
       frag.u = (l0 * screen[a + 9]! + l1 * screen[b + 9]! + l2 * screen[c + 9]!) * w
       frag.v = (l0 * screen[a + 10]! + l1 * screen[b + 10]! + l2 * screen[c + 10]!) * w
+      frag.edge = Math.min(l0 * k0, l1 * k1, l2 * k2)
       frag.cx = x
       frag.cy = y
       frag.invW = invW

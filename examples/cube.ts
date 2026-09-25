@@ -6,7 +6,7 @@ import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { rotateX, rotateY, sdBox, sdSphere, sdTorus, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { shadowFrom } from '../src/core/shadow.ts'
-import { lambert, normalColor } from '../src/core/shading.ts'
+import { lambert, normalColor, wireframe } from '../src/core/shading.ts'
 import { Supersampler } from '../src/core/supersample.ts'
 import { checker } from '../src/core/texture.ts'
 import { vec3 } from '../src/core/vec3.ts'
@@ -103,6 +103,7 @@ let textured = false
 let shadows = false
 let antialias = false
 let sampler: Supersampler | null = null
+let wired = false
 let spin = 0
 
 term.enter()
@@ -128,6 +129,9 @@ term.onKey((key) => {
       break
     case 'a':
       antialias = !antialias
+      break
+    case 'w':
+      wired = !wired
       break
     case 'n':
       showNormals = !showNormals
@@ -191,7 +195,7 @@ const loop = runLoop((dt) => {
       })
     : undefined
 
-  const shader = showNormals
+  const lit = showNormals
     ? normalColor()
     : lambert({
         albedo: vec3(0.95, 0.75, 0.45),
@@ -205,6 +209,17 @@ const loop = runLoop((dt) => {
         ...(textured && subject.mesh ? { map: MAP } : {}),
         ...(occlusion ? { shadow: occlusion } : {}),
       })
+
+  // No fill, so the interior comes out blank -- and blank still writes depth,
+  // which is what leaves the far edges hidden behind the near faces.
+  //
+  // A whole cell wide, because anything thinner comes apart. A cube's edges
+  // are a connected graph, so a correct drawing of them is one 8-connected
+  // blob; measured, 0.6 leaves the terminal's in ten pieces and the browser's
+  // in twenty-seven, 0.85 joins the terminal's up but not the browser's, and
+  // 1.0 joins both. Supersampling does not rescue a thinner one -- averaging
+  // only dims it further.
+  const shader = wired ? wireframe({ width: 1 }) : lit
 
   if (occlusion) {
     // The floor is triangles and what darkens it is a field: the occluder
@@ -234,7 +249,7 @@ const loop = runLoop((dt) => {
 
   term.status(
     `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height}` +
-      `${antialias ? ` · ${SS_FACTOR}x aa` : ''} · ${loop.fps.toFixed(0)} fps` +
-      '   [space] shape  [r] ramp  [t] texture  [s] shadow  [a] aa  [n] normals  [p] pause  [q] quit',
+      `${antialias ? ` · ${SS_FACTOR}x aa` : ''}${wired ? ' · wire' : ''} · ${loop.fps.toFixed(0)} fps` +
+      '   [space] shape  [r] ramp  [t] tex  [s] shadow  [a] aa  [w] wire  [n] normals  [p] pause  [q] quit',
   )
 }, 60)

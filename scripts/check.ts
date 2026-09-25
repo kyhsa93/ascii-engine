@@ -42,7 +42,7 @@ import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { sdBox, sdSphere, smoothUnion, translate } from '../src/core/sdf.ts'
 import { shadowFrom } from '../src/core/shadow.ts'
-import { lambert, unlit } from '../src/core/shading.ts'
+import { lambert, unlit, wireframe } from '../src/core/shading.ts'
 import { Supersampler } from '../src/core/supersample.ts'
 import { checker, fromAscii, parsePpm, sample, texture, writePpm } from '../src/core/texture.ts'
 import { Terminal, to256 } from '../src/term/ansi.ts'
@@ -90,6 +90,7 @@ interface Sample {
   nz: number
   u: number
   v: number
+  edge: number
   cx: number
   cy: number
   invW: number
@@ -107,6 +108,7 @@ function recorder(into: Sample[]): Shader {
       nz: f.nz,
       u: f.u,
       v: f.v,
+      edge: f.edge,
       cx: f.cx,
       cy: f.cy,
       invW: f.invW,
@@ -1172,7 +1174,7 @@ test('a shadow dims the light but never the ambient', () => {
     shadow: shadowFrom(translate(sdSphere(1), 0, 1.5, 0), { light: SHADOW_LIGHT }),
   })
 
-  const frag = { px: -1.1, py: 0, pz: -1.2, nx: 0, ny: 1, nz: 0, u: 0, v: 0, cx: 0, cy: 0, invW: 1 }
+  const frag = { px: -1.1, py: 0, pz: -1.2, nx: 0, ny: 1, nz: 0, u: 0, v: 0, edge: 0, cx: 0, cy: 0, invW: 1 }
   const out = { r: 0, g: 0, b: 0, char: 0 }
   shader(frag, out)
 
@@ -1359,6 +1361,186 @@ test('a supersampled silhouette gains shades a single sample cannot have', () =>
 
   smoothed.resolve(RAMPS.long)
   console.log('\n' + smoothed.toString() + '\n')
+})
+
+console.log('\nwireframe')
+
+test('the edge distance is the real perpendicular distance, in cells', () => {
+  // Ground truth is plane geometry on the projected triangle, worked out from
+  // the camera by hand. The rasterizer's own barycentrics take no part in it.
+  const width = 50
+  const height = 26
+  const fovY = Math.PI / 4
+  const aspect = aspectFor(width, height, 0.5)
+  const f = 1 / Math.tan(fovY / 2)
+  const camera = new Camera({ position: vec3(0, 0, 3), fovY })
+
+  // A triangle at z = 0, so every vertex divides by the same w of 3.
+  const corners: [number, number][] = [
+    [-1.1, -0.9],
+    [1.3, -0.7],
+    [0.1, 1.2],
+  ]
+  const mesh: Mesh = {
+    positions: new Float32Array(corners.flatMap(([x, y]) => [x, y, 0])),
+    normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1]),
+    indices: new Uint32Array([0, 1, 2]),
+  }
+
+  const screen = corners.map(([x, y]) => [
+    (((f / aspect) * x) / 3 / 2 + 0.5) * width,
+    (0.5 - (f * y) / 3 / 2) * height,
+  ])
+
+  const distanceToSegmentLine = (px: number, py: number, p: number[], q: number[]): number => {
+    const ex = q[0]! - p[0]!
+    const ey = q[1]! - p[1]!
+    // The line through p and q, not the segment: a triangle's edge extends to
+    // its corners, and that is where the three distances meet.
+    return Math.abs(ex * (py - p[1]!) - ey * (px - p[0]!)) / Math.hypot(ex, ey)
+  }
+
+  const samples: Sample[] = []
+  const fb = new Framebuffer(width, height)
+  fb.clear()
+  drawMesh(fb, mesh, identity(), camera.viewProjection(aspect), recorder(samples), 'none')
+  assert(samples.length > 100, `expected a solid triangle, got ${samples.length} fragments`)
+
+  let worst = 0
+  for (const s of samples) {
+    const px = s.cx + 0.5
+    const py = s.cy + 0.5
+    const expected = Math.min(
+      distanceToSegmentLine(px, py, screen[1]!, screen[2]!),
+      distanceToSegmentLine(px, py, screen[2]!, screen[0]!),
+      distanceToSegmentLine(px, py, screen[0]!, screen[1]!),
+    )
+    worst = Math.max(worst, Math.abs(s.edge - expected))
+  }
+  assert(worst < 1e-3, `the edge distance is off by up to ${worst.toFixed(5)} cells`)
+})
+
+test('the wire keeps its width however big the triangle gets', () => {
+  // The reason the fragment carries a distance and not a barycentric. A
+  // barycentric threshold is a fraction of the triangle, so the same setting
+  // would draw a wire several times thicker on the near quad than the far one.
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const vp = camera.viewProjection(aspectFor(90, 44, 0.5))
+  const line = vec3(1, 1, 1)
+
+  const runAt = (z: number) => {
+    const fb = new Framebuffer(90, 44)
+    fb.clear()
+    drawMesh(fb, quad(3, z), identity(), vp, wireframe({ line, width: 2.5 }))
+
+    let minX = Infinity
+    let maxX = -1
+    for (let x = 0; x < 90; x++) {
+      for (let y = 0; y < 44; y++) {
+        if (fb.depth[y * 90 + x]! <= 0) continue
+        minX = Math.min(minX, x)
+        maxX = Math.max(maxX, x)
+      }
+    }
+    // Count the wire along the row through the middle, starting at the left
+    // edge of the quad: an axis-aligned quad puts a vertical edge there.
+    const row = 22
+    let wire = 0
+    for (let x = minX; x <= maxX; x++) {
+      if (colorAt(fb, x, row)[0] < 0.5) break
+      wire++
+    }
+    return { span: maxX - minX + 1, wire }
+  }
+
+  const near = runAt(0)
+  const far = runAt(-8)
+  assert(near.span >= far.span * 2.5, `the two quads should differ a lot in size: ${near.span} against ${far.span}`)
+  assert(near.wire > 1 && far.wire > 1, `expected a wire on both, got ${near.wire} and ${far.wire}`)
+  assert(
+    Math.abs(near.wire - far.wire) <= 1,
+    `the wire changed width with the triangle: ${near.wire} cells against ${far.wire}`,
+  )
+})
+
+test('a blank interior still hides what is behind it', () => {
+  // Hidden-line removal is not a feature of the shader, it is the depth buffer
+  // doing its usual job -- but only because the blank interior is written
+  // rather than skipped.
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const vp = camera.viewProjection(aspectFor(50, 24, 0.5))
+
+  const fb = new Framebuffer(50, 24)
+  fb.clear()
+  drawMesh(fb, quad(2, 0), identity(), vp, wireframe({ line: vec3(1, 1, 1), width: 0.6 }))
+  const insideBefore = colorAt(fb, 25, 12)[0]
+  assert(insideBefore < 0.5, 'the middle of the quad should be blank, not wire')
+
+  drawMesh(fb, quad(100, -2), identity(), vp, unlit(vec3(1, 0, 0)))
+  assert(colorAt(fb, 25, 12)[0] < 0.5, 'a farther surface showed through the blank interior')
+  assert(colorAt(fb, 1, 12)[0] === 1, 'the farther surface should still be visible outside the quad')
+})
+
+test('a fill shader takes the interior and the wire keeps the edges', () => {
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const vp = camera.viewProjection(aspectFor(50, 24, 0.5))
+  const fb = new Framebuffer(50, 24)
+  fb.clear()
+  drawMesh(
+    fb,
+    quad(2, 0),
+    identity(),
+    vp,
+    wireframe({ line: vec3(0, 0, 1), width: 0.6, fill: unlit(vec3(1, 0, 0)) }),
+  )
+
+  let wire = 0
+  let filled = 0
+  for (let i = 0; i < fb.depth.length; i++) {
+    if (fb.depth[i]! <= 0) continue
+    if (fb.color[i * 3 + 2]! === 1) wire++
+    else if (fb.color[i * 3]! === 1) filled++
+  }
+  assert(wire > 20, `expected a wire around the quad, got ${wire} cells`)
+  assert(filled > wire, `the fill should cover more than the wire: ${filled} against ${wire}`)
+})
+
+test('a marched surface reports no edges and comes out all wire', () => {
+  // A field has no triangles, so it has no edges to be near: every marched
+  // fragment reads zero. Pinned here so it cannot change quietly.
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const fb = new Framebuffer(40, 20)
+  fb.clear()
+  marchScene(fb, sdSphere(1), camera, aspectFor(40, 20, 0.5), wireframe({ line: vec3(1, 1, 1), width: 0.6 }))
+
+  let covered = 0
+  let wire = 0
+  for (let i = 0; i < fb.depth.length; i++) {
+    if (fb.depth[i]! <= 0) continue
+    covered++
+    if (fb.color[i * 3]! === 1) wire++
+  }
+  assert(covered > 100, `expected a marched sphere, got ${covered} cells`)
+  assert(wire === covered, `${covered - wire} marched cells were not treated as edges`)
+})
+
+test('a wireframe cube shows its front edges and not its back ones', () => {
+  const camera = new Camera({ position: vec3(2.6, 2.1, 3.6), fovY: Math.PI / 3.2 })
+  const fb = new Framebuffer(74, 32)
+  fb.clear(0, 0, 0)
+  drawMesh(
+    fb,
+    cube(2),
+    identity(),
+    camera.viewProjection(aspectFor(74, 32, 0.5)),
+    wireframe({ line: vec3(1, 0.95, 0.85), width: 0.55 }),
+  )
+  fb.resolve(RAMPS.short)
+  console.log('\n' + fb.toString() + '\n')
+
+  let wire = 0
+  for (let i = 0; i < fb.depth.length; i++) if (fb.color[i * 3]! > 0.5) wire++
+  assert(wire > 60, `expected the cube's visible edges, got ${wire} cells`)
 })
 
 console.log('\ncharacter output')

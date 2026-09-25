@@ -272,6 +272,25 @@ try {
     assert(smoothed.frames > grounded.frames, `frames stopped after switching aa on, stuck at ${grounded.frames}`)
   })
 
+  // Still paused. Wireframe replaces the interior with blanks and keeps the
+  // edges, so the silhouette should not move while what fills it does. How
+  // wide the wire comes out, and that it stays that wide on triangles of very
+  // different sizes, is settled in `npm run check` against plane geometry --
+  // a page can only show that the frame changed and the outline did not.
+  await page.click('button[data-action="wire"]')
+  await page.waitForTimeout(400)
+  const wired = await readScreen(page)
+
+  check('the wire button redraws the subject as its edges', () => {
+    assert(wired.digest !== smoothed.digest, 'the frame is identical with and without the wireframe')
+    assert(
+      Math.abs(wired.bboxW - smoothed.bboxW) <= 2 && Math.abs(wired.bboxH - smoothed.bboxH) <= 2,
+      `the silhouette moved: ${smoothed.bboxW}x${smoothed.bboxH} became ${wired.bboxW}x${wired.bboxH}`,
+    )
+    assert(problems.length === 0, `the wireframe path threw: ${problems.join(' | ')}`)
+    assert(wired.frames > smoothed.frames, `frames stopped after switching the wire on, stuck at ${smoothed.frames}`)
+  })
+
   await page.screenshot({ path: join(SHOTS, 'desktop.png') })
 
   const phone = await context.newPage()

@@ -12,9 +12,19 @@ export interface MarchOptions {
   maxDistance?: number
 }
 
-// A distance field has no vertices and so no texture coordinates: every
-// marched fragment reads (0, 0), which is what an untextured shader ignores.
-const frag: Fragment = { px: 0, py: 0, pz: 0, nx: 0, ny: 0, nz: 0, u: 0, v: 0, cx: 0, cy: 0, invW: 0 }
+// A distance field has no vertices, so it has neither texture coordinates nor
+// triangle edges: every marched fragment reads (0, 0) for uv and zero for the
+// edge distance. An untextured shader ignores the first; a wireframe shader
+// would paint a marched surface entirely as wire, which is the honest answer
+// to asking a field for the edges it does not have.
+const frag: Fragment = {
+  px: 0, py: 0, pz: 0,
+  nx: 0, ny: 0, nz: 0,
+  u: 0, v: 0,
+  edge: 0,
+  cx: 0, cy: 0,
+  invW: 0,
+}
 const surf: Surface = { r: 0, g: 0, b: 0, char: 0 }
 
 /**

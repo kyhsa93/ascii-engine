@@ -98,6 +98,60 @@ export function normalColor(): Shader {
   }
 }
 
+export interface WireframeOptions {
+  /** Colour of the wire. */
+  line?: Vec3
+  /** Half-width of the wire, in cells. */
+  width?: number
+  /**
+   * What to draw away from an edge. Given a shader, the interior is that
+   * shader's; given nothing, the interior is left blank — which still writes
+   * depth, so a solid in front goes on hiding the wires behind it.
+   */
+  fill?: Shader
+  /** Glyph forced on the wire; 0 lets luminance choose one. */
+  char?: number
+}
+
+/**
+ * Draws the edges of each triangle.
+ *
+ * The width is in cells and stays in cells: the fragment arrives knowing its
+ * distance to the nearest edge, so a wire is as thick on a triangle filling
+ * the screen as on one a few cells across. Thresholding a barycentric instead
+ * — the usual shortcut — makes the wire thin out as the triangle grows.
+ *
+ * Two things it is honest about. The edges are the *triangle's*, so a quad
+ * built from two triangles shows the diagonal between them. And a cell is
+ * taller than it is wide, so a wire measured in cells is physically thicker
+ * across a horizontal edge than across a vertical one.
+ */
+export function wireframe(options: WireframeOptions = {}): Shader {
+  const line = options.line ?? vec3(0.9, 0.95, 1)
+  const width = options.width ?? 0.6
+  const fill = options.fill
+  const char = options.char ?? 0
+
+  return (f, out) => {
+    if (f.edge <= width) {
+      out.r = line.x
+      out.g = line.y
+      out.b = line.z
+      out.char = char
+      return
+    }
+    if (fill) {
+      fill(f, out)
+      return
+    }
+    // Blank, but still depth-tested: this is what removes hidden lines.
+    out.r = 0
+    out.g = 0
+    out.b = 0
+    out.char = 32
+  }
+}
+
 /** A flat colour, ignoring every light in the scene. */
 export function unlit(color: Vec3, char = 0): Shader {
   return (_f, out) => {

@@ -272,6 +272,48 @@ position that can be worked out from the projection by hand, so the cell it
 lands in has an exact coverage — some whole number of sub-columns out of
 `factor` — and the resolved brightness has to be that fraction exactly.
 
+## Wireframe
+
+The fragment arrives knowing how far it is from the nearest edge of its
+triangle, in cells, so drawing the edges is a shader rather than a second
+drawing path.
+
+```ts
+import { wireframe } from './src/core/shading.ts'
+
+drawMesh(fb, mesh, model, vp, wireframe({ width: 0.6 }))
+drawMesh(fb, mesh, model, vp, wireframe({ width: 0.6, fill: lambert({ ... }) }))
+```
+
+Measuring that distance in *cells* rather than in barycentrics is the whole
+point. The usual shortcut — colour the fragment when some barycentric drops
+below a threshold — makes the wire thin out as its triangle grows on screen,
+because a barycentric is a fraction of the triangle rather than a length. An
+edge function is already the distance to that edge times the edge's length, so
+dividing the triangle's area by each edge length turns the three barycentrics
+back into distances; all three factors are constant across the triangle, which
+leaves three multiplies per fragment.
+
+Given no `fill`, the interior is drawn blank — and blank still writes depth, so
+a solid nearer the camera goes on hiding the wires behind it. Hidden-line
+removal is the depth buffer doing its usual job.
+
+Two things it is honest about rather than hiding. The edges belong to the
+*triangle*, so a quad built from two of them shows the diagonal, and a
+triangle cut by the near plane shows the cut. And a cell is taller than it is
+wide, so a wire measured in cells is physically thicker across a horizontal
+edge than across a vertical one.
+
+There is also a floor under the width. At one sample per cell a wire much
+thinner than a whole cell comes apart, because a diagonal edge keeps missing
+the cell centres it passes between. A cube's edges are a connected graph, so
+a correct drawing of them is a single 8-connected blob — measured, a width of
+0.6 leaves 80x23 cells showing it in ten pieces and 163x50 in twenty-seven,
+0.85 joins the smaller grid up but not the larger, and 1.0 joins both. That
+is why the demos ask for a whole cell. Supersampling does not rescue a
+thinner wire either: averaging spreads the same ink over more cells and dims
+it, which reads as more gaps rather than fewer.
+
 ## Writing a shader
 
 A shader is a plain function. It is handed the interpolated fragment and a

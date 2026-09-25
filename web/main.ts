@@ -6,7 +6,7 @@ import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { rotateX, rotateY, sdBox, sdSphere, sdTorus, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { shadowFrom } from '../src/core/shadow.ts'
-import { lambert, normalColor } from '../src/core/shading.ts'
+import { lambert, normalColor, wireframe } from '../src/core/shading.ts'
 import { Supersampler } from '../src/core/supersample.ts'
 import { checker } from '../src/core/texture.ts'
 import { vec3 } from '../src/core/vec3.ts'
@@ -103,6 +103,7 @@ let textured = false
 let shadows = false
 let antialias = false
 let sampler: Supersampler | null = null
+let wired = false
 let spin = 0
 
 let frames = 0
@@ -164,6 +165,7 @@ document.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((but
     if (button.dataset.action === 'texture') textured = !textured
     if (button.dataset.action === 'shadow') shadows = !shadows
     if (button.dataset.action === 'aa') antialias = !antialias
+    if (button.dataset.action === 'wire') wired = !wired
     if (button.dataset.action === 'normals') showNormals = !showNormals
     if (button.dataset.action === 'pause') spinning = !spinning
   })
@@ -213,7 +215,7 @@ function frame(now: number): void {
       })
     : undefined
 
-  const shader = showNormals
+  const lit = showNormals
     ? normalColor()
     : lambert({
         albedo: vec3(0.95, 0.75, 0.45),
@@ -227,6 +229,16 @@ function frame(now: number): void {
         ...(textured && subject.mesh ? { map: MAP } : {}),
         ...(occlusion ? { shadow: occlusion } : {}),
       })
+
+  // No fill, so the interior comes out blank -- and blank still writes depth,
+  // which is what leaves the far edges hidden behind the near faces.
+  //
+  // A whole cell wide, because anything thinner comes apart. A cube's edges
+  // are a connected graph, so a correct drawing of them is one 8-connected
+  // blob; measured, 0.6 leaves this grid's in twenty-seven pieces and 0.85 in
+  // six, while 1.0 joins them up. Supersampling does not rescue a thinner one
+  // -- averaging only dims it further.
+  const shader = wired ? wireframe({ width: 1 }) : lit
 
   if (occlusion) {
     // The floor is triangles and what darkens it is a field: the occluder
@@ -256,7 +268,7 @@ function frame(now: number): void {
 
   stats.textContent =
     `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height} cells` +
-    `${antialias ? ` · ${SS_FACTOR}x aa` : ''} · ${fps.toFixed(0)} fps`
+    `${antialias ? ` · ${SS_FACTOR}x aa` : ''}${wired ? ' · wire' : ''} · ${fps.toFixed(0)} fps`
   requestAnimationFrame(frame)
 }
 

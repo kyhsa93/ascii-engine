@@ -37,6 +37,7 @@ import {
   type Mesh,
 } from '../src/core/mesh.ts'
 import { marchScene } from '../src/core/march.ts'
+import { drawAxes, drawLine3, drawText, label3 } from '../src/core/overlay.ts'
 import { RAMPS } from '../src/core/ramp.ts'
 import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
@@ -1541,6 +1542,235 @@ test('a wireframe cube shows its front edges and not its back ones', () => {
   let wire = 0
   for (let i = 0; i < fb.depth.length; i++) if (fb.color[i * 3]! > 0.5) wire++
   assert(wire > 60, `expected the cube's visible edges, got ${wire} cells`)
+})
+
+console.log('\noverlay')
+
+/** The glyph at a cell, as a string, for readable assertions. */
+function glyphAt(fb: Framebuffer, x: number, y: number): string {
+  return String.fromCharCode(fb.chars[y * fb.width + x]!)
+}
+
+test('drawText puts the glyphs where it says and clips rather than wraps', () => {
+  const fb = new Framebuffer(10, 3)
+  fb.clear()
+  drawText(fb, 2, 1, 'abc')
+  assert(glyphAt(fb, 2, 1) === 'a' && glyphAt(fb, 3, 1) === 'b' && glyphAt(fb, 4, 1) === 'c', 'abc is not at 2,1')
+  assert(glyphAt(fb, 1, 1) === ' ' && glyphAt(fb, 5, 1) === ' ', 'drawText spilled into its neighbours')
+
+  // Off the left: the characters that fall outside are dropped, and the rest
+  // stay in their own columns rather than shifting in.
+  drawText(fb, -1, 0, 'xyz')
+  assert(glyphAt(fb, 0, 0) === 'y' && glyphAt(fb, 1, 0) === 'z', `clipped left wrong: ${glyphAt(fb, 0, 0)}`)
+
+  // Off the right: no wrap onto the next row.
+  drawText(fb, 9, 2, 'pq')
+  assert(glyphAt(fb, 9, 2) === 'p', 'the last column should still take a character')
+  assert(glyphAt(fb, 0, 0) === 'y', 'a character wrapped onto another row')
+
+  const before = fb.chars.join(',')
+  drawText(fb, 0, 5, 'zz')
+  assert(fb.chars.join(',') === before, 'a row outside the grid still wrote something')
+})
+
+test('drawText aligns on the column it is given', () => {
+  const fb = new Framebuffer(12, 2)
+  fb.clear()
+  drawText(fb, 5, 0, 'abcd', { align: 'center' })
+  assert(glyphAt(fb, 3, 0) === 'a', `centred text starts at ${glyphAt(fb, 3, 0)}`)
+  drawText(fb, 5, 1, 'abcd', { align: 'right' })
+  assert(glyphAt(fb, 5, 1) === 'd', `right-aligned text ends at ${glyphAt(fb, 5, 1)}`)
+})
+
+test('resolve leaves overlay text alone', () => {
+  // The claim that makes text cheap here: `resolve` only fills cells a shader
+  // left on auto, so a glyph written directly survives it.
+  const fb = new Framebuffer(8, 1)
+  fb.clear(0, 0, 0)
+  drawText(fb, 1, 0, 'hello', { color: vec3(1, 1, 1) })
+  fb.resolve(RAMPS.long)
+  assert(fb.toString().includes('hello'), `text did not survive resolve: ${fb.toString()}`)
+})
+
+test('label3 lands on the cell the projection puts it in', () => {
+  const width = 60
+  const height = 30
+  const fovY = Math.PI / 4
+  const aspect = aspectFor(width, height, 0.5)
+  const f = 1 / Math.tan(fovY / 2)
+  const camera = new Camera({ position: vec3(0, 0, 3), fovY })
+
+  // At z = 0 the clip w is the camera distance, so the projection is one
+  // division and can be written out here without touching the renderer.
+  const point = vec3(0.62, 0.25, 0)
+  const sx = (((f / aspect) * point.x) / 3 / 2 + 0.5) * width
+  const sy = (0.5 - (f * point.y) / 3 / 2) * height
+
+  // Cell i spans [i, i + 1) and the rasterizer samples its centre at i + 0.5,
+  // so the cell holding a screen coordinate is its floor. The first version of
+  // this test rounded -- the same mistake the implementation was making -- and
+  // so agreed with it about a label sitting half a cell off.
+  const col = Math.floor(sx)
+  const row = Math.floor(sy)
+  assert(
+    sx - col >= 0.5 && sy - row >= 0.5,
+    `this point cannot tell floor from round: ${sx.toFixed(3)}, ${sy.toFixed(3)}`,
+  )
+
+  const fb = new Framebuffer(width, height)
+  fb.clear()
+  assert(label3(fb, point, camera.viewProjection(aspect), 'A'), 'the label should have been drawn')
+  assert(glyphAt(fb, col, row) === 'A', `expected A at ${col},${row}, found "${glyphAt(fb, col, row)}"`)
+})
+
+test('a label behind the camera is dropped, not mirrored', () => {
+  // Dividing by a negative w puts the point on the opposite side of the
+  // screen, where a label looks perfectly plausible and is in entirely the
+  // wrong place. This is the assertion that keeps that from happening.
+  const fb = new Framebuffer(40, 20)
+  fb.clear()
+  const camera = new Camera({ position: vec3(0, 0, 3), target: vec3(0, 0, 0), fovY: Math.PI / 4 })
+  const before = fb.chars.join(',')
+
+  const drew = label3(fb, vec3(0.4, 0.2, 9), camera.viewProjection(aspectFor(40, 20, 0.5)), 'B')
+  assert(!drew, 'a point behind the camera reported that it drew')
+  assert(fb.chars.join(',') === before, 'a point behind the camera still wrote to the grid')
+})
+
+test('an occluded label is dropped only when asked', () => {
+  const camera = new Camera({ position: vec3(0, 0, 3), fovY: Math.PI / 4 })
+  const vp = camera.viewProjection(aspectFor(40, 20, 0.5))
+  const behind = vec3(0, 0, -2)
+
+  const fb = new Framebuffer(40, 20)
+  fb.clear()
+  drawMesh(fb, quad(100, 0), identity(), vp, unlit(vec3(0.2, 0.2, 0.2)))
+
+  assert(!label3(fb, behind, vp, 'C', { occlude: true }), 'a label behind a wall was drawn anyway')
+  assert(label3(fb, behind, vp, 'C'), 'without occlude the label should be drawn regardless')
+  assert(fb.toString().includes('C'), 'the unoccluded label is missing from the frame')
+})
+
+test('a line stays on the segment between its ends', () => {
+  const width = 60
+  const height = 30
+  const fovY = Math.PI / 4
+  const aspect = aspectFor(width, height, 0.5)
+  const f = 1 / Math.tan(fovY / 2)
+  const camera = new Camera({ position: vec3(0, 0, 3), fovY })
+
+  const a = vec3(-1.2, -0.7, 0)
+  const b = vec3(1.1, 0.8, 0)
+  const project = (p: typeof a) => [
+    (((f / aspect) * p.x) / 3 / 2 + 0.5) * width,
+    (0.5 - (f * p.y) / 3 / 2) * height,
+  ]
+  const [ax, ay] = project(a)
+  const [bx, by] = project(b)
+
+  const fb = new Framebuffer(width, height)
+  fb.clear(0, 0, 0)
+  drawLine3(fb, a, b, camera.viewProjection(aspect), { color: vec3(1, 1, 1) })
+
+  let drawn = 0
+  let worst = 0
+  const ex = bx! - ax!
+  const ey = by! - ay!
+  const len = Math.hypot(ex, ey)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (fb.color[(y * width + x) * 3]! < 0.5) continue
+      drawn++
+      worst = Math.max(worst, Math.abs(ex * (y + 0.5 - ay!) - ey * (x + 0.5 - ax!)) / len)
+    }
+  }
+  assert(drawn > 20, `expected a line of cells, got ${drawn}`)
+  // Every sample sits exactly on the line before it is quantised, and
+  // quantising can move it half a cell on each axis, so the furthest a
+  // correctly drawn cell can end up is hypot(0.5, 0.5). Anything beyond that
+  // is a systematic offset rather than rounding -- which is how the half-cell
+  // one this caught showed up, at 1.186.
+  assert(worst < 0.75, `a cell sits ${worst.toFixed(3)} cells off the segment`)
+
+  // One name for the quantiser, used everywhere this test turns a screen
+  // coordinate into a cell. Spelling it out at each site is how the half-cell
+  // mistake got into three places at once -- the implementation, the label
+  // test, and these two lookups, which kept rounding after the rest had
+  // stopped.
+  const cellOf = (s: number) => Math.floor(s)
+  const litAt = (sx: number, sy: number) => fb.color[(cellOf(sy) * width + cellOf(sx)) * 3]! > 0.5
+  assert(litAt(ax!, ay!), 'the first endpoint was not drawn')
+  assert(litAt(bx!, by!), 'the second endpoint was not drawn')
+})
+
+test('a line half behind the camera is cut, not folded over', () => {
+  // With the near plane respected this runs from the middle of the frame up
+  // and off the top. Without it, the far end divides by a negative w, lands
+  // below the frame instead, and the visible part is the bottom few rows --
+  // so where the cells are is what tells the two apart.
+  const width = 40
+  const height = 20
+  const camera = new Camera({ position: vec3(0, 0, 0), target: vec3(0, 0, -1), fovY: Math.PI / 4 })
+  const fb = new Framebuffer(width, height)
+  fb.clear(0, 0, 0)
+  drawLine3(fb, vec3(0, -0.5, -2), vec3(0, 1, 1), camera.viewProjection(aspectFor(width, height, 0.5)), {
+    color: vec3(1, 1, 1),
+  })
+
+  let minRow = Infinity
+  let maxRow = -1
+  const columns = new Set<number>()
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (fb.color[(y * width + x) * 3]! < 0.5) continue
+      minRow = Math.min(minRow, y)
+      maxRow = Math.max(maxRow, y)
+      columns.add(x)
+    }
+  }
+  assert(maxRow >= 0, 'the visible half of the line should still be drawn')
+  assert(minRow === 0, `the clipped line should reach the top row, it starts at ${minRow}`)
+  assert(maxRow <= 17, `nothing should be drawn below the near end, but a cell sits at row ${maxRow}`)
+  assert(columns.size <= 2, `a vertical line should stay in one column, it used ${columns.size}`)
+})
+
+test('a line is hidden behind nearer geometry', () => {
+  const camera = new Camera({ position: vec3(0, 0, 3), fovY: Math.PI / 4 })
+  const vp = camera.viewProjection(aspectFor(40, 20, 0.5))
+  const fb = new Framebuffer(40, 20)
+  fb.clear(0, 0, 0)
+  drawMesh(fb, quad(100, 0), identity(), vp, unlit(vec3(0.3, 0.3, 0.3)))
+  drawLine3(fb, vec3(-1, 0, -2), vec3(1, 0, -2), vp, { color: vec3(1, 1, 1) })
+
+  let bright = 0
+  for (let i = 0; i < fb.depth.length; i++) if (fb.color[i * 3]! > 0.9) bright++
+  assert(bright === 0, `${bright} cells of a line behind a wall came through`)
+})
+
+test('drawAxes draws three lettered axes', () => {
+  const camera = new Camera({ position: vec3(2.4, 1.8, 3.2), fovY: Math.PI / 3.2 })
+  const fb = new Framebuffer(70, 28)
+  fb.clear(0, 0, 0)
+  const vp = camera.viewProjection(aspectFor(70, 28, 0.5))
+  drawMesh(fb, cube(1.2), identity(), vp, lambert({ albedo: vec3(0.5, 0.42, 0.3), ambient: 0.15 }))
+  drawAxes(fb, vp, { length: 1.6 })
+  fb.resolve(RAMPS.short)
+
+  const frame = fb.toString()
+  for (const letter of ['x', 'y', 'z']) {
+    assert(frame.includes(letter), `the ${letter} axis has no label`)
+  }
+  // Each axis has its own colour, so counting distinct strong hues finds them.
+  const hues = new Set<string>()
+  for (let i = 0; i < fb.depth.length; i++) {
+    const r = fb.color[i * 3]!
+    const g = fb.color[i * 3 + 1]!
+    const b = fb.color[i * 3 + 2]!
+    if (Math.max(r, g, b) < 0.4) continue
+    hues.add(`${r > 0.9 ? 1 : 0}${g > 0.9 ? 1 : 0}${b > 0.9 ? 1 : 0}`)
+  }
+  assert(hues.size >= 3, `expected three axis colours, found ${hues.size}`)
+  console.log('\n' + frame + '\n')
 })
 
 console.log('\ncharacter output')

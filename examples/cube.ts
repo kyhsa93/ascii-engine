@@ -2,6 +2,7 @@ import { Camera, aspectFor, fitDistance } from '../src/core/camera.ts'
 import { multiply, rotationX, rotationY, translation } from '../src/core/mat4.ts'
 import { marchScene } from '../src/core/march.ts'
 import { boundingRadius, cube, plane, sphere, torus, type Mesh } from '../src/core/mesh.ts'
+import { drawAxes, drawText } from '../src/core/overlay.ts'
 import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { rotateX, rotateY, sdBox, sdSphere, sdTorus, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
@@ -104,6 +105,7 @@ let shadows = false
 let antialias = false
 let sampler: Supersampler | null = null
 let wired = false
+let axes = false
 let spin = 0
 
 term.enter()
@@ -132,6 +134,9 @@ term.onKey((key) => {
       break
     case 'w':
       wired = !wired
+      break
+    case 'o':
+      axes = !axes
       break
     case 'n':
       showNormals = !showNormals
@@ -244,12 +249,39 @@ const loop = runLoop((dt) => {
   else marchScene(target, subject.field(spin), camera, aspect, shader, MARCH)
 
   if (target !== fb && sampler) sampler.resolveInto(fb)
+
+  // Overlays go into the output grid and never into the supersampler's fine
+  // one: averaging a glyph with its neighbours is how text becomes smudge.
+  // After the downsample and before `resolve`, so an axis left on auto still
+  // gets its glyph picked from its own brightness.
+  if (axes) {
+    // Two settings, each measured rather than guessed.
+    //
+    // Short, because the camera fits the subject's radius with a little
+    // margin and the *vertical* half angle is the tight one: a tip at 1.4
+    // radii puts its letter on row -9 and 1.2 on row -3, while 1.0 lands on
+    // row 2 and 0.9 on row 5. Only the y label is ever lost, which is why the
+    // frame looked fine with an x and a z in it.
+    //
+    // And no depth test, because short enough to keep the labels also means
+    // buried: the sphere's radius *is* the fitted radius, so its axes sit
+    // entirely inside it. Depth-tested, the three axes draw 1, 1 and 1 cells
+    // on the sphere and 1, 9 and 12 on the cube -- uneven even within one
+    // subject. Untested they draw 23, 21 and 27 on both. A gizmo is an
+    // annotation, like the letters that label it.
+    drawAxes(fb, vp, { length: subject.radius * 0.9, depthTest: false })
+    // A caption rather than a label on the subject: a projected point can
+    // leave the frame, and the name is worth more than the exactness.
+    drawText(fb, 1, 1, subject.name, { color: vec3(0.85, 0.9, 1) })
+  }
+
   fb.resolve(RAMPS[rampNames[rampIndex]!])
   term.present(fb)
 
   term.status(
     `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height}` +
-      `${antialias ? ` · ${SS_FACTOR}x aa` : ''}${wired ? ' · wire' : ''} · ${loop.fps.toFixed(0)} fps` +
-      '   [space] shape  [r] ramp  [t] tex  [s] shadow  [a] aa  [w] wire  [n] normals  [p] pause  [q] quit',
+      `${antialias ? ` · ${SS_FACTOR}x aa` : ''}${wired ? ' · wire' : ''}${axes ? ' · axes' : ''}` +
+      ` · ${loop.fps.toFixed(0)} fps` +
+      '   [space] shape [r] ramp [t] tex [s] shadow [a] aa [w] wire [o] axes [n] normals [p] pause [q] quit',
   )
 }, 60)

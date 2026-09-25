@@ -314,6 +314,61 @@ is why the demos ask for a whole cell. Supersampling does not rescue a
 thinner wire either: averaging spreads the same ink over more cells and dims
 it, which reads as more gaps rather than fewer.
 
+## Overlays: text, lines, axes
+
+Text is the one thing a character renderer gets for nothing. A pixel engine
+needs a font atlas and a sampler to put a label on screen; here a label is
+already made of the same stuff as the picture, so writing one is writing
+glyphs into cells.
+
+```ts
+import { drawAxes, drawLine3, drawText, label3 } from './src/core/overlay.ts'
+
+drawText(fb, 0, 0, 'front view')                       // grid coordinates
+label3(fb, vec3(0, 1.6, 0), vp, 'north', { occlude: true })  // world coordinates
+drawLine3(fb, a, b, vp, { color: vec3(1, 0.4, 0.4) })
+drawAxes(fb, vp, { length: 1.6 })
+```
+
+`Framebuffer.resolve` only fills cells a shader left on auto, so a glyph
+written directly survives it. Lines are the other way round: left on auto,
+they take their character from their own brightness like everything else.
+
+Three rules, each with a test behind it:
+
+- **Draw overlays last, into the output grid.** Text ignores the depth buffer,
+  so anything drawn afterwards paints over it — and drawing into a
+  `Supersampler`'s fine grid averages each glyph with its neighbours, which
+  turns letters into smudge. The demos draw them after the downsample and
+  before the ramp.
+- **A point behind the camera is dropped, not projected.** Dividing by a
+  negative w mirrors it to the opposite side of the screen, where a label
+  looks perfectly plausible and is in entirely the wrong place. `label3`
+  returns whether it drew anything.
+- **Lines are clipped at the near plane** for the same reason triangles are,
+  and their depth interpolates as 1/w — so a line can be hidden behind a
+  surface, and can hide one.
+
+An axis gizmo runs into both of those at once, and the two pull against each
+other. `fitDistance` frames a sphere of some radius, and on a wide grid the
+*vertical* half angle is the tight one, so an axis longer than that radius
+pushes its letter off the top while the two horizontal ones stay comfortably
+on screen — measured at the demo's framing, a tip at 1.4 radii lands on row
+-9 and 1.2 on row -3, against row 2 at 1.0 and row 5 at 0.9. That argues for
+a short axis.
+
+But short enough to keep the label is also short enough to be swallowed: the
+sphere's radius *is* the fitted radius, so an axis at 0.9 of it never leaves
+the ball. Depth-tested, the three axes then draw 1, 1 and 1 cells on the
+sphere and 1, 9 and 12 on the cube — uneven even within a single subject,
+because a cube's radius is its corner and a sphere's is its surface.
+Untested, they draw 23, 21 and 27 on either. So the demos ask for `depthTest:
+false`: a gizmo is an annotation, like the letters that label it, and the
+depth-tested behaviour stays for lines that really are part of the scene.
+
+The demos also caption the subject with `drawText` in a corner rather than a
+label on it, since a projected point can leave the frame and a corner cannot.
+
 ## Writing a shader
 
 A shader is a plain function. It is handed the interpolated fragment and a

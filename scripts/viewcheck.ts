@@ -58,6 +58,16 @@ interface Probe {
   bboxH: number
   /** A cheap hash of the whole frame, for "did this change at all" questions. */
   digest: number
+  /**
+   * Whether the frame holds an x, a y and a z.
+   *
+   * A safe signal that a letter came from an overlay rather than from shading:
+   * the demo's ramp is `short`, which is ` .:-=+*#%@` and contains none of
+   * them, and no ramp in the engine contains a lowercase y at all.
+   */
+  letters: boolean
+  /** The distinct characters in the frame, for a readable failure message. */
+  sample: string
   minX: number
   maxX: number
   minY: number
@@ -99,6 +109,8 @@ function readScreen(page: Page): Promise<Probe> {
     const root = document.documentElement
     return {
       digest,
+      letters: text.includes('x') && text.includes('y') && text.includes('z'),
+      sample: [...glyphs].sort().join(''),
       cellAspect: probe.cellAspect as number,
       cols: probe.cols as number,
       rows: probe.rows as number,
@@ -289,6 +301,22 @@ try {
     )
     assert(problems.length === 0, `the wireframe path threw: ${problems.join(' | ')}`)
     assert(wired.frames > smoothed.frames, `frames stopped after switching the wire on, stuck at ${smoothed.frames}`)
+  })
+
+  // Still paused. The overlay is the one thing drawn after the downsample and
+  // before the ramp is applied, so this is where a page can catch it being
+  // wired into the wrong buffer -- text averaged with its neighbours comes
+  // back as smudge rather than letters. Where a label lands is settled in
+  // `npm run check` against the projection written out by hand.
+  await page.click('button[data-action="axes"]')
+  await page.waitForTimeout(400)
+  const annotated = await readScreen(page)
+
+  check('the axes button writes letters over the frame', () => {
+    assert(annotated.digest !== wired.digest, 'the frame is identical with and without the axes')
+    assert(annotated.letters, `expected the x, y and z labels, found "${annotated.sample}"`)
+    assert(problems.length === 0, `the overlay path threw: ${problems.join(' | ')}`)
+    assert(annotated.frames > wired.frames, `frames stopped after switching axes on, stuck at ${wired.frames}`)
   })
 
   await page.screenshot({ path: join(SHOTS, 'desktop.png') })

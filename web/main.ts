@@ -7,6 +7,7 @@ import { drawMesh } from '../src/core/renderer.ts'
 import { rotateX, rotateY, sdBox, sdSphere, sdTorus, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { shadowFrom } from '../src/core/shadow.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
+import { Supersampler } from '../src/core/supersample.ts'
 import { checker } from '../src/core/texture.ts'
 import { vec3 } from '../src/core/vec3.ts'
 import { PreSurface } from '../src/web/pre.ts'
@@ -50,6 +51,18 @@ const FLOOR = plane(40, 1)
  */
 const MARCH = { maxSteps: 64, epsilon: 3e-3 }
 
+/**
+ * Sub-samples per cell along each axis when antialiasing is on: four in all.
+ *
+ * The obvious guess is that four samples cost four times as much, and they do
+ * not — only the cells a triangle covers pay that, while clearing and
+ * resolving scale with the grid and most of a frame is background. Measured on
+ * the sphere: this grid, 163x50 cells, goes from 0.88 ms a frame to 2.51 at 2x
+ * and 5.22 at 3x, so three is affordable and two is where the staircase
+ * already goes.
+ */
+const SS_FACTOR = 2
+
 const shapes: Subject[] = [
   { name: 'cube', radius: boundingRadius(cube(2)), mesh: cube(2), field: (s) => turned(sdBox(1, 1, 1), s) },
   { name: 'sphere', radius: 1.3, mesh: sphere(1.3), field: () => sdSphere(1.3) },
@@ -88,6 +101,8 @@ let spinning = true
 let showNormals = false
 let textured = false
 let shadows = false
+let antialias = false
+let sampler: Supersampler | null = null
 let spin = 0
 
 let frames = 0
@@ -148,6 +163,7 @@ document.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((but
     if (button.dataset.action === 'ramp') rampIndex = (rampIndex + 1) % rampNames.length
     if (button.dataset.action === 'texture') textured = !textured
     if (button.dataset.action === 'shadow') shadows = !shadows
+    if (button.dataset.action === 'aa') antialias = !antialias
     if (button.dataset.action === 'normals') showNormals = !showNormals
     if (button.dataset.action === 'pause') spinning = !spinning
   })
@@ -169,6 +185,17 @@ function frame(now: number): void {
   const fb = surface.framebuffer()
   fb.clear(0.02, 0.02, 0.05)
 
+  // Everything below draws into `target`. With antialiasing on that is a finer
+  // grid which gets averaged back down at the end; nothing that draws has to
+  // know which one it got.
+  if (antialias && (!sampler || sampler.width !== fb.width || sampler.height !== fb.height)) {
+    sampler = new Supersampler(fb.width, fb.height, SS_FACTOR)
+  }
+  const target = antialias && sampler ? sampler.buffer : fb
+  if (target !== fb) target.clear(0.02, 0.02, 0.05)
+
+  // The fine grid is scaled by the same factor on both axes, so its cells are
+  // the same shape as the output's and the aspect below is right for either.
   const aspect = aspectFor(fb.width, fb.height, surface.cellAspect)
   const subject = shapes[shape]!
   camera.orbit(yaw, pitch, fitDistance(subject.radius, camera.fovY, aspect) * zoom)
@@ -205,7 +232,7 @@ function frame(now: number): void {
     // The floor is triangles and what darkens it is a field: the occluder
     // never has to be the thing being drawn.
     drawMesh(
-      fb,
+      target,
       FLOOR,
       translation(0, -subject.radius - 0.2, 0),
       vp,
@@ -220,13 +247,16 @@ function frame(now: number): void {
   // Two paths into one framebuffer. The mesh turns by a model matrix; the
   // field has no vertices to move, so it turns by being sampled in a rotated
   // frame instead.
-  if (subject.mesh) drawMesh(fb, subject.mesh, model, vp, shader)
-  else marchScene(fb, subject.field(spin), camera, aspect, shader, MARCH)
+  if (subject.mesh) drawMesh(target, subject.mesh, model, vp, shader)
+  else marchScene(target, subject.field(spin), camera, aspect, shader, MARCH)
 
+  if (target !== fb && sampler) sampler.resolveInto(fb)
   fb.resolve(RAMPS[rampNames[rampIndex]!])
   surface.present(fb)
 
-  stats.textContent = `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height} cells · ${fps.toFixed(0)} fps`
+  stats.textContent =
+    `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height} cells` +
+    `${antialias ? ` · ${SS_FACTOR}x aa` : ''} · ${fps.toFixed(0)} fps`
   requestAnimationFrame(frame)
 }
 

@@ -7,6 +7,7 @@ import { drawMesh } from '../src/core/renderer.ts'
 import { rotateX, rotateY, sdBox, sdSphere, sdTorus, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { shadowFrom } from '../src/core/shadow.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
+import { Supersampler } from '../src/core/supersample.ts'
 import { checker } from '../src/core/texture.ts'
 import { vec3 } from '../src/core/vec3.ts'
 import { Terminal, runLoop } from '../src/term/ansi.ts'
@@ -53,6 +54,18 @@ const FLOOR = plane(40, 1)
  */
 const MARCH = { maxSteps: 64, epsilon: 3e-3 }
 
+/**
+ * Sub-samples per cell along each axis when antialiasing is on: four in all.
+ *
+ * The obvious guess is that four samples cost four times as much, and they do
+ * not — only the cells a triangle covers pay that, while clearing and
+ * resolving scale with the grid and most of a frame is background. Measured on
+ * the sphere: 80x23 cells go from 0.64 ms a frame to 0.84 at 2x and 1.35 at
+ * 3x; 163x50 from 0.88 to 2.51 and 5.22. Two is where the staircase goes and
+ * the browser still has room to spare.
+ */
+const SS_FACTOR = 2
+
 const shapes: Subject[] = [
   { name: 'cube', radius: boundingRadius(cube(2)), mesh: cube(2), field: (s) => turned(sdBox(1, 1, 1), s) },
   { name: 'sphere', radius: 1.3, mesh: sphere(1.3), field: () => sdSphere(1.3) },
@@ -88,6 +101,8 @@ let spinning = true
 let showNormals = false
 let textured = false
 let shadows = false
+let antialias = false
+let sampler: Supersampler | null = null
 let spin = 0
 
 term.enter()
@@ -110,6 +125,9 @@ term.onKey((key) => {
       break
     case 's':
       shadows = !shadows
+      break
+    case 'a':
+      antialias = !antialias
       break
     case 'n':
       showNormals = !showNormals
@@ -145,6 +163,17 @@ const loop = runLoop((dt) => {
   const fb = term.framebuffer()
   fb.clear(0.02, 0.02, 0.05)
 
+  // Everything below draws into `target`. With antialiasing on that is a finer
+  // grid which gets averaged back down at the end; nothing that draws has to
+  // know which one it got.
+  if (antialias && (!sampler || sampler.width !== fb.width || sampler.height !== fb.height)) {
+    sampler = new Supersampler(fb.width, fb.height, SS_FACTOR)
+  }
+  const target = antialias && sampler ? sampler.buffer : fb
+  if (target !== fb) target.clear(0.02, 0.02, 0.05)
+
+  // The fine grid is scaled by the same factor on both axes, so its cells are
+  // the same shape as the output's and the aspect below is right for either.
   const aspect = aspectFor(fb.width, fb.height, term.cellAspect)
   const subject = shapes[shape]!
   camera.orbit(yaw, pitch, fitDistance(subject.radius, camera.fovY, aspect) * zoom)
@@ -181,7 +210,7 @@ const loop = runLoop((dt) => {
     // The floor is triangles and what darkens it is a field: the occluder
     // never has to be the thing being drawn.
     drawMesh(
-      fb,
+      target,
       FLOOR,
       translation(0, -subject.radius - 0.2, 0),
       vp,
@@ -196,14 +225,16 @@ const loop = runLoop((dt) => {
   // Two paths into one framebuffer. The mesh turns by a model matrix; the
   // field has no vertices to move, so it turns by being sampled in a rotated
   // frame instead.
-  if (subject.mesh) drawMesh(fb, subject.mesh, model, vp, shader)
-  else marchScene(fb, subject.field(spin), camera, aspect, shader, MARCH)
+  if (subject.mesh) drawMesh(target, subject.mesh, model, vp, shader)
+  else marchScene(target, subject.field(spin), camera, aspect, shader, MARCH)
 
+  if (target !== fb && sampler) sampler.resolveInto(fb)
   fb.resolve(RAMPS[rampNames[rampIndex]!])
   term.present(fb)
 
   term.status(
-    `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height} · ${loop.fps.toFixed(0)} fps` +
-      '   [space] shape  [r] ramp  [t] texture  [s] shadow  [n] normals  [p] pause  [q] quit',
+    `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height}` +
+      `${antialias ? ` · ${SS_FACTOR}x aa` : ''} · ${loop.fps.toFixed(0)} fps` +
+      '   [space] shape  [r] ramp  [t] texture  [s] shadow  [a] aa  [n] normals  [p] pause  [q] quit',
   )
 }, 60)

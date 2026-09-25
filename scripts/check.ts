@@ -43,6 +43,7 @@ import { drawMesh } from '../src/core/renderer.ts'
 import { sdBox, sdSphere, smoothUnion, translate } from '../src/core/sdf.ts'
 import { shadowFrom } from '../src/core/shadow.ts'
 import { lambert, unlit } from '../src/core/shading.ts'
+import { Supersampler } from '../src/core/supersample.ts'
 import { checker, fromAscii, parsePpm, sample, texture, writePpm } from '../src/core/texture.ts'
 import { Terminal, to256 } from '../src/term/ansi.ts'
 import { cross, normalize, sub, vec3 } from '../src/core/vec3.ts'
@@ -1211,6 +1212,153 @@ test('a floor of triangles takes a shadow from a field', () => {
   for (let i = 0; i < fb.chars.length; i++) if (fb.depth[i]! > 0) glyphs.add(fb.chars[i]!)
   assert(glyphs.size >= 6, `expected floor, shadow and ball to separate, got ${glyphs.size} glyphs`)
   console.log('\n' + fb.toString() + '\n')
+})
+
+console.log('\nsupersampling')
+
+/** A white half-plane whose right edge sits at `edgeX`, facing +z. */
+function halfPlane(edgeX: number): Mesh {
+  return {
+    positions: new Float32Array([-50, -50, 0, edgeX, -50, 0, edgeX, 50, 0, -50, 50, 0]),
+    normals: new Float32Array([0, 0, 1, 0, 0, 1, 0, 0, 1, 0, 0, 1]),
+    indices: new Uint32Array([0, 1, 2, 0, 2, 3]),
+  }
+}
+
+test('an edge cell comes out at exactly its coverage fraction', () => {
+  // The projection is simple enough to invert by hand, so where the edge lands
+  // on the grid is known arithmetic rather than something read off the render.
+  // The cell it falls in covers a whole number of sub-columns out of `factor`,
+  // and the averaged brightness has to be that fraction exactly -- not close
+  // to it, and not merely darker than its neighbour.
+  const width = 40
+  const height = 20
+  const factor = 4
+  const edgeX = 0.2
+  const fovY = Math.PI / 4
+  const aspect = aspectFor(width, height, 0.5)
+
+  const f = 1 / Math.tan(fovY / 2)
+  // The quad sits at z = 0 and the camera two units back, so clip w is 2.
+  const edgeNdc = ((f / aspect) * edgeX) / 2
+  const edgeCell = (edgeNdc * 0.5 + 0.5) * width
+  const cell = Math.floor(edgeCell)
+  let covered = 0
+  for (let i = 0; i < factor; i++) if (cell + (i + 0.5) / factor < edgeCell) covered++
+  assert(covered > 0 && covered < factor, `the edge should split this cell, ${covered} of ${factor} covered`)
+
+  const camera = new Camera({ position: vec3(0, 0, 2), fovY })
+  const vp = camera.viewProjection(aspect)
+  const row = height >> 1
+
+  const aa = new Supersampler(width, height, factor)
+  aa.clear()
+  drawMesh(aa.buffer, halfPlane(edgeX), identity(), vp, unlit(vec3(1, 1, 1)))
+  const fb = new Framebuffer(width, height)
+  aa.resolveInto(fb)
+
+  close(colorAt(fb, cell, row)[0], covered / factor, 1e-6, `the edge cell should be ${covered}/${factor} lit`)
+  close(colorAt(fb, cell - 1, row)[0], 1, 1e-6, 'the cell inside the edge should be fully lit')
+  close(colorAt(fb, cell + 1, row)[0], 0, 1e-6, 'the cell outside the edge should be untouched')
+
+  // And the staircase this replaces: one sample per cell can only answer in or
+  // out, so the same cell comes back fully lit.
+  const plain = new Framebuffer(width, height)
+  plain.clear()
+  drawMesh(plain, halfPlane(edgeX), identity(), vp, unlit(vec3(1, 1, 1)))
+  close(colorAt(plain, cell, row)[0], 1, 1e-6, 'without supersampling the edge cell should be all or nothing')
+})
+
+test('supersampling changes nothing where there is no edge', () => {
+  // Averaging identical samples has to be the identity, or this is a blur
+  // rather than an antialiaser.
+  const camera = new Camera({ position: vec3(0, 0, 1) })
+  const vp = camera.viewProjection(aspectFor(40, 20))
+  const white = unlit(vec3(1, 1, 1))
+
+  const plain = new Framebuffer(40, 20)
+  plain.clear()
+  drawMesh(plain, quad(100, 0), identity(), vp, white)
+
+  const aa = new Supersampler(40, 20, 3)
+  aa.clear()
+  drawMesh(aa.buffer, quad(100, 0), identity(), vp, white)
+  const resolved = new Framebuffer(40, 20)
+  aa.resolveInto(resolved)
+
+  assert(coverage(plain) === 800 && coverage(resolved) === 800, 'both renders should cover the whole grid')
+  assert(
+    plain.color.every((v, i) => Math.abs(v - resolved.color[i]!) < 1e-6),
+    'a fully covered frame came out different after resampling',
+  )
+})
+
+test('a resolved cell keeps the nearest depth, not the average one', () => {
+  // A partly covered cell has to go on occluding what is behind it. An
+  // averaged depth would put it somewhere between the surface and the
+  // background, which is where nothing is.
+  const camera = new Camera({ position: vec3(0, 0, 3) })
+  const vp = camera.viewProjection(aspectFor(40, 20))
+
+  const aa = new Supersampler(40, 20, 4)
+  aa.clear()
+  drawMesh(aa.buffer, halfPlane(0.2), identity(), vp, unlit(vec3(1, 0, 0)))
+  const fb = new Framebuffer(40, 20)
+  aa.resolveInto(fb)
+
+  const edge = fb.color.slice(0, fb.color.length)
+  // Now a farther quad across the whole grid: it must lose everywhere the
+  // near half-plane left any coverage at all, edge cells included.
+  drawMesh(fb, quad(100, -1), identity(), vp, unlit(vec3(0, 0, 1)))
+
+  let partial = 0
+  for (let i = 0; i < fb.depth.length; i++) {
+    const before = edge[i * 3]!
+    if (before <= 0 || before >= 1) continue
+    partial++
+    close(fb.color[i * 3]!, before, 1e-6, `a partly covered cell at ${i % 40},${(i / 40) | 0} was overdrawn`)
+  }
+  assert(partial > 5, `expected a column of partly covered cells, found ${partial}`)
+})
+
+test('a glyph a shader forced survives the averaging', () => {
+  // Colour can be averaged and a character cannot, so the nearest sub-sample's
+  // choice wins outright and that edge stays hard.
+  const camera = new Camera({ position: vec3(0, 0, 1) })
+  const aa = new Supersampler(8, 2, 3)
+  aa.clear()
+  drawMesh(aa.buffer, quad(100, 0), identity(), camera.viewProjection(aspectFor(8, 2)), unlit(vec3(1, 1, 1), 64))
+  const fb = new Framebuffer(8, 2)
+  aa.resolveInto(fb)
+  fb.resolve(RAMPS.short)
+  assert(fb.toString() === '@@@@@@@@\n@@@@@@@@', `forced glyphs did not survive:\n${fb.toString()}`)
+})
+
+test('a supersampled silhouette gains shades a single sample cannot have', () => {
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const vp = camera.viewProjection(aspectFor(60, 28, 0.5))
+  const white = unlit(vec3(1, 1, 1))
+
+  const plain = new Framebuffer(60, 28)
+  plain.clear()
+  drawMesh(plain, sphere(1.2, 64, 48), identity(), vp, white)
+
+  const aa = new Supersampler(60, 28, 3)
+  aa.clear()
+  drawMesh(aa.buffer, sphere(1.2, 64, 48), identity(), vp, white)
+  const smoothed = new Framebuffer(60, 28)
+  aa.resolveInto(smoothed)
+
+  const shades = (fb: Framebuffer) => {
+    const seen = new Set<number>()
+    for (let i = 0; i < fb.depth.length; i++) seen.add(Math.round(fb.color[i * 3]! * 1000))
+    return seen.size
+  }
+  assert(shades(plain) === 2, `one sample per cell can only be in or out, got ${shades(plain)} shades`)
+  assert(shades(smoothed) >= 5, `expected a range of partial coverage, got ${shades(smoothed)} shades`)
+
+  smoothed.resolve(RAMPS.long)
+  console.log('\n' + smoothed.toString() + '\n')
 })
 
 console.log('\ncharacter output')

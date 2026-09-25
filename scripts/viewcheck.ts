@@ -252,6 +252,26 @@ try {
     )
   })
 
+  // Still paused. Antialiasing changes no geometry at all — it draws the same
+  // scene on a finer grid and averages back down — so the frame changing is
+  // the whole of what a browser can show here. What the averaging actually
+  // computes is settled in `npm run check`, against a coverage fraction worked
+  // out from the projection by hand.
+  await page.click('button[data-action="aa"]')
+  await page.waitForTimeout(400)
+  const smoothed = await readScreen(page)
+
+  check('the aa button resamples without breaking the frame', () => {
+    assert(smoothed.digest !== grounded.digest, 'the frame is identical with and without supersampling')
+    assert(smoothed.shape === grounded.shape, `the subject changed underneath the test: ${smoothed.shape}`)
+    assert(
+      smoothed.glyphs >= grounded.glyphs,
+      `averaging should not lose shades: ${grounded.glyphs} glyphs became ${smoothed.glyphs}`,
+    )
+    assert(problems.length === 0, `the supersampling path threw: ${problems.join(' | ')}`)
+    assert(smoothed.frames > grounded.frames, `frames stopped after switching aa on, stuck at ${grounded.frames}`)
+  })
+
   await page.screenshot({ path: join(SHOTS, 'desktop.png') })
 
   const phone = await context.newPage()

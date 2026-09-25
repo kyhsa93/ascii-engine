@@ -38,6 +38,7 @@ src/core/     the renderer — no terminal, no DOM
   march.ts      distance field -> rays -> the same framebuffer
   texture.ts    sampling with wrap and filter modes, checker, ASCII art, PPM
   shadow.ts     a second march, toward the light
+  supersample.ts  draw on a finer grid, average back down
   shading.ts    Lambert + Blinn-Phong, normal debug view
   framebuffer.ts  the character grid, and luminance -> glyph resolution
   ramp.ts       character ramps
@@ -224,6 +225,52 @@ Three things that are easy to get wrong here:
   screen. The demo opens from the other side for that reason — measured on the
   sphere, no shadowed floor cell at all is visible from the old default view
   and 381 are from the new one, and raising the camera does not rescue it.
+
+## Antialiasing
+
+One sample per cell means a silhouette is either in or out, so it comes out as
+a staircase. `Supersampler` draws the scene on a grid `factor` times finer in
+each direction and averages the colour back down.
+
+```ts
+import { Supersampler } from './src/core/supersample.ts'
+
+const aa = new Supersampler(fb.width, fb.height, 2)
+aa.clear()
+drawMesh(aa.buffer, mesh, model, vp, shader)   // or marchScene(aa.buffer, ...)
+aa.resolveInto(fb)
+fb.resolve(RAMPS.long)
+```
+
+This suits a character renderer better than it suits a pixel one. Because the
+glyph is picked from luminance *after* shading, a half-covered cell comes out
+half as bright and therefore lands on a middling character by itself — the
+edge becomes a gradient with no special case anywhere in the rasterizer. And
+because it is the framebuffer that changes rather than anything that draws
+into one, the marched path gets it for free.
+
+Four things worth knowing:
+
+- **The fine grid has the same shape as the output.** Both axes scale by the
+  same factor, so `aspectFor` gives the same answer for either and the camera
+  needs no adjustment.
+- **Colour is averaged; depth is not.** A cell takes the *nearest* of its
+  sub-samples, so a partly covered cell still occludes what is drawn behind it
+  afterwards. Averaging depth would place the cell where no surface is.
+- **A forced glyph cannot be averaged.** A shader that sets `out.char` wins
+  outright at the nearest sub-sample, and that edge stays hard.
+- **It costs less than the square of the factor.** Only the cells a triangle
+  actually covers pay that; clearing and resolving scale with the grid, and
+  most of a frame is usually background. Measured on a sphere: 80x23 cells go
+  from 0.64 ms a frame to 0.84 at 2x and 1.35 at 3x, and 163x50 from 0.88 to
+  2.51 and 5.22.
+- **A cell no sub-sample touched keeps the background's space**, so a frame
+  with nothing in it resolves identically either way.
+
+The check does not compare pictures. A quad's edge projects to a screen
+position that can be worked out from the projection by hand, so the cell it
+lands in has an exact coverage — some whole number of sub-columns out of
+`factor` — and the resolved brightness has to be that fraction exactly.
 
 ## Writing a shader
 

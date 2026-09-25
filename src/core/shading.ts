@@ -1,0 +1,79 @@
+import type { Shader } from './raster.ts'
+import type { Vec3 } from './vec3.ts'
+import { normalize, vec3 } from './vec3.ts'
+
+export interface LambertOptions {
+  albedo?: Vec3
+  /** Direction from the surface *toward* the light. Normalized on the way in. */
+  light?: Vec3
+  lightColor?: Vec3
+  /** Fraction of the albedo that survives in shadow. */
+  ambient?: number
+  /** Blinn-Phong highlight strength; 0 disables the highlight entirely. */
+  specular?: number
+  shininess?: number
+  /** Camera position. Required for a highlight, ignored without one. */
+  eye?: Vec3
+}
+
+/** Diffuse shading with an optional Blinn-Phong highlight. */
+export function lambert(options: LambertOptions = {}): Shader {
+  const albedo = options.albedo ?? vec3(1, 1, 1)
+  const l = normalize(options.light ?? vec3(0.5, 0.8, 0.6))
+  const lightColor = options.lightColor ?? vec3(1, 1, 1)
+  const ambient = options.ambient ?? 0.12
+  const specular = options.specular ?? 0
+  const shininess = options.shininess ?? 32
+  const eye = options.eye ?? vec3(0, 0, 0)
+
+  return (f, out) => {
+    const len = Math.hypot(f.nx, f.ny, f.nz) || 1
+    const nx = f.nx / len
+    const ny = f.ny / len
+    const nz = f.nz / len
+
+    const diffuse = Math.max(0, nx * l.x + ny * l.y + nz * l.z)
+    let spec = 0
+    if (specular > 0 && diffuse > 0) {
+      let vx = eye.x - f.px
+      let vy = eye.y - f.py
+      let vz = eye.z - f.pz
+      const vlen = Math.hypot(vx, vy, vz) || 1
+      vx /= vlen
+      vy /= vlen
+      vz /= vlen
+      let hx = l.x + vx
+      let hy = l.y + vy
+      let hz = l.z + vz
+      const hlen = Math.hypot(hx, hy, hz) || 1
+      hx /= hlen
+      hy /= hlen
+      hz /= hlen
+      spec = specular * Math.pow(Math.max(0, nx * hx + ny * hy + nz * hz), shininess)
+    }
+
+    out.r = Math.min(1, albedo.x * (ambient + diffuse * lightColor.x) + spec)
+    out.g = Math.min(1, albedo.y * (ambient + diffuse * lightColor.y) + spec)
+    out.b = Math.min(1, albedo.z * (ambient + diffuse * lightColor.z) + spec)
+  }
+}
+
+/** Paints the raw surface normal as colour. The classic "is my mesh right?" view. */
+export function normalColor(): Shader {
+  return (f, out) => {
+    const len = Math.hypot(f.nx, f.ny, f.nz) || 1
+    out.r = f.nx / len * 0.5 + 0.5
+    out.g = f.ny / len * 0.5 + 0.5
+    out.b = f.nz / len * 0.5 + 0.5
+  }
+}
+
+/** A flat colour, ignoring every light in the scene. */
+export function unlit(color: Vec3, char = 0): Shader {
+  return (_f, out) => {
+    out.r = color.x
+    out.g = color.y
+    out.b = color.z
+    out.char = char
+  }
+}

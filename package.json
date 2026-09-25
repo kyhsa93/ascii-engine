@@ -1,0 +1,21 @@
+{
+  "name": "ascii-engine",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "description": "A 3D software renderer whose framebuffer is a grid of characters.",
+  "scripts": {
+    "demo": "node examples/cube.ts",
+    "web": "vite",
+    "build": "tsc && vite build",
+    "check": "tsc && node scripts/check.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "typescript": "^5.8.3",
+    "vite": "^6.3.5"
+  },
+  "allowScripts": {
+    "esbuild@0.25.12": true
+  }
+}

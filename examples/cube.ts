@@ -6,6 +6,7 @@ import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { rotateY, sdBox, sdSphere, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
+import { checker } from '../src/core/texture.ts'
 import { vec3 } from '../src/core/vec3.ts'
 import { Terminal, runLoop } from '../src/term/ansi.ts'
 
@@ -38,6 +39,9 @@ const shapes: Subject[] = [
       rotateY(smoothUnion(sdSphere(1.05), translate(sdBox(0.7, 0.7, 0.7), 0.9, 0.7, 0.4), 0.55), spin),
   },
 ]
+/** What the texture toggle applies. Six squares reads clearly at terminal size. */
+const MAP = checker(6)
+
 const rampNames = Object.keys(RAMPS) as RampName[]
 
 const term = new Terminal({ reserveRows: 1 })
@@ -52,6 +56,7 @@ let pitch = 0.35
 let zoom = 1
 let spinning = true
 let showNormals = false
+let textured = false
 let spin = 0
 
 term.enter()
@@ -68,6 +73,9 @@ term.onKey((key) => {
       break
     case 'r':
       rampIndex = (rampIndex + 1) % rampNames.length
+      break
+    case 't':
+      textured = !textured
       break
     case 'n':
       showNormals = !showNormals
@@ -118,6 +126,9 @@ const loop = runLoop((dt) => {
         specular: 0.45,
         shininess: 24,
         eye: camera.position,
+        // A distance field has no vertices and so no texture coordinates:
+        // every fragment of one reads (0, 0). The map is offered to meshes only.
+        ...(textured && 'mesh' in subject ? { map: MAP } : {}),
       })
 
   // Two paths into one framebuffer. The mesh turns by a model matrix; the
@@ -131,6 +142,6 @@ const loop = runLoop((dt) => {
 
   term.status(
     `${shapes[shape]!.name} · ramp ${rampNames[rampIndex]} · ${fb.width}x${fb.height} · ${loop.fps.toFixed(0)} fps` +
-      '   [space] shape  [r] ramp  [n] normals  [p] pause  [arrows] orbit  [+/-] zoom  [q] quit',
+      '   [space] shape  [r] ramp  [t] texture  [n] normals  [p] pause  [arrows] orbit  [q] quit',
   )
 }, 60)

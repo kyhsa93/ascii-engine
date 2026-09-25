@@ -36,6 +36,7 @@ src/core/     the renderer — no terminal, no DOM
   renderer.ts   mesh -> triangles -> rasterizer
   sdf.ts        signed distance primitives and the operations that combine them
   march.ts      distance field -> rays -> the same framebuffer
+  texture.ts    sampling with wrap and filter modes, checker, ASCII art, PPM
   shading.ts    Lambert + Blinn-Phong, normal debug view
   framebuffer.ts  the character grid, and luminance -> glyph resolution
   ramp.ts       character ramps
@@ -112,7 +113,7 @@ nothing at terminal size and cuts a 163x50 browser frame from 15.8 ms to
 
 ## Loading a model
 
-`parseObj` reads the part of Wavefront OBJ that describes geometry — `v`,
+`parseObj` reads the part of Wavefront OBJ that describes geometry — `v`, `vt`,
 `vn`, and `f` with any of its index spellings, negative indices included — and
 fans polygons into triangles. `writeObj` goes the other way.
 
@@ -136,6 +137,42 @@ off; the reader keys on the position/normal pair instead. And a file may
 declare normals and still leave some faces without them — those vertices get
 derived normals, but only those, because a zero normal shades as unlit black
 and reads as a lighting choice rather than as a bug.
+
+## Textures
+
+Texture coordinates travel through the pipeline as two more interpolated
+attributes and arrive on the fragment as `u` and `v`. `lambert` takes a `map`
+and multiplies it into the albedo; any shader can call `sample` itself.
+
+```ts
+import { checker, fromAscii, parsePpm, sample } from './src/core/texture.ts'
+
+drawMesh(fb, cube(2), model, vp, lambert({ albedo: vec3(1, 0.9, 0.7), map: checker(6) }))
+```
+
+Nothing here decodes PNG or JPEG. Adding an image library to a renderer that
+draws with characters would be a strange trade, so what it reads instead is
+PPM — a real image format a few dozen lines can parse — alongside two sources
+that need no file at all: a procedural `checker`, and `fromAscii`, which reads
+a block of ASCII art back through a ramp into brightness. That last one is the
+inverse of what `Framebuffer.resolve` does, and it means a picture drawn in
+characters can be wrapped around a solid drawn in characters.
+
+Three details the tests hold shut:
+
+- **Interpolation is perspective-correct.** Affine texture coordinates are the
+  classic wobble of a software rasterizer, and they are invisible until the
+  surface is steep. The check renders a plane receding to the horizon and
+  compares every fragment's `u` and `v` against a ray-plane intersection
+  computed outside the rasterizer — not against the fragment's own world
+  position, which rides the same interpolator and would be wrong in step.
+- **Bilinear sampling is centred on the texel, not its corner.** Skip the
+  half-texel shift and the picture slides by half a texel whenever it is
+  magnified: invisible on a photograph, obvious on a checkerboard.
+- **The v axis flips at the OBJ boundary.** OBJ measures v upward from the
+  bottom edge; a texture here is stored with `v = 0` as its first row. The
+  reader and writer each flip, and a flip applied once rather than twice
+  survives every other test and shows up only as an upside-down picture.
 
 ## Writing a shader
 
@@ -187,6 +224,7 @@ Terminal and browser share the same scene.
 | --- | --- |
 | `space` | cycle cube / sphere / torus / blend (the raymarched one) |
 | `r` | cycle character ramp |
+| `t` | toggle the checker map (meshes only — a field has no uv) |
 | `n` | toggle the normal debug view |
 | `p` | pause the spin |
 | arrows | orbit the camera |

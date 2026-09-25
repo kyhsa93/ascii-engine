@@ -33,6 +33,7 @@ export function drawMesh(
   const mvp = multiply(viewProjection, model)
   const nm = normalMatrix(model)
   const vertexCount = mesh.positions.length / 3
+  const uvs = mesh.uvs
 
   if (cache.length < vertexCount * CLIP_STRIDE) cache = new Float32Array(vertexCount * CLIP_STRIDE)
 
@@ -48,6 +49,11 @@ export function drawMesh(
     cache[o + 5] = world[1]!
     cache[o + 6] = world[2]!
     transformDirection(nm, mesh.normals[p]!, mesh.normals[p + 1]!, mesh.normals[p + 2]!, cache, o + 7)
+    // Texture coordinates ride along as two more interpolated attributes; a
+    // mesh without them reads as (0, 0) everywhere, which is what an untextured
+    // shader ignores anyway.
+    cache[o + 10] = uvs ? uvs[i * 2]! : 0
+    cache[o + 11] = uvs ? uvs[i * 2 + 1]! : 0
   }
 
   const indices = mesh.indices

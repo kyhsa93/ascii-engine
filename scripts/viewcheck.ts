@@ -56,6 +56,8 @@ interface Probe {
   glyphs: number
   bboxW: number
   bboxH: number
+  /** A cheap hash of the whole frame, for "did this change at all" questions. */
+  digest: number
   minX: number
   maxX: number
   minY: number
@@ -91,8 +93,12 @@ function readScreen(page: Page): Promise<Probe> {
       }
     })
 
+    let digest = 0
+    for (let i = 0; i < text.length; i++) digest = (digest * 31 + text.charCodeAt(i)) | 0
+
     const root = document.documentElement
     return {
+      digest,
       cellAspect: probe.cellAspect as number,
       cols: probe.cols as number,
       rows: probe.rows as number,
@@ -194,6 +200,25 @@ try {
 
   check('the sphere renders a gradient, not a flat blob', () => {
     assert(round.glyphs >= 5, `only ${round.glyphs} distinct glyphs across the sphere`)
+  })
+
+  // Pause first. The subject spins, so a frame taken before and after any
+  // button press differs no matter what the button does — the comparison
+  // would pass on a texture toggle wired to nothing at all.
+  await page.click('button[data-action="pause"]')
+  await page.waitForTimeout(250)
+  const plain = await readScreen(page)
+  await page.click('button[data-action="texture"]')
+  await page.waitForTimeout(250)
+  const mapped = await readScreen(page)
+
+  check('the texture button changes what is drawn', () => {
+    assert(
+      mapped.digest !== plain.digest,
+      'the frame is identical with and without the checker map, so the map never reached the shader',
+    )
+    assert(mapped.shape === plain.shape, `the subject changed underneath the test: ${mapped.shape}`)
+    assert(mapped.glyphs >= 5, `the mapped sphere lost its gradient: ${mapped.glyphs} glyphs`)
   })
 
   await page.screenshot({ path: join(SHOTS, 'desktop.png') })

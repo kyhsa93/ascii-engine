@@ -6,6 +6,7 @@ import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { rotateY, sdBox, sdSphere, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
+import { checker } from '../src/core/texture.ts'
 import { vec3 } from '../src/core/vec3.ts'
 import { PreSurface } from '../src/web/pre.ts'
 
@@ -35,6 +36,9 @@ const shapes: Subject[] = [
       rotateY(smoothUnion(sdSphere(1.05), translate(sdBox(0.7, 0.7, 0.7), 0.9, 0.7, 0.4), 0.55), spin),
   },
 ]
+/** What the texture toggle applies. Six squares reads clearly at this size. */
+const MAP = checker(6)
+
 const rampNames = Object.keys(RAMPS) as RampName[]
 
 const screen = document.getElementById('screen')!
@@ -52,6 +56,7 @@ let pitch = 0.35
 let zoom = 1
 let spinning = true
 let showNormals = false
+let textured = false
 let spin = 0
 
 let frames = 0
@@ -110,6 +115,7 @@ document.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((but
   button.addEventListener('click', () => {
     if (button.dataset.action === 'shape') shape = (shape + 1) % shapes.length
     if (button.dataset.action === 'ramp') rampIndex = (rampIndex + 1) % rampNames.length
+    if (button.dataset.action === 'texture') textured = !textured
     if (button.dataset.action === 'normals') showNormals = !showNormals
     if (button.dataset.action === 'pause') spinning = !spinning
   })
@@ -146,6 +152,9 @@ function frame(now: number): void {
         specular: 0.45,
         shininess: 24,
         eye: camera.position,
+        // A distance field has no vertices and so no texture coordinates:
+        // every fragment of one reads (0, 0). The map is offered to meshes only.
+        ...(textured && 'mesh' in subject ? { map: MAP } : {}),
       })
 
   // Two paths into one framebuffer. The mesh turns by a model matrix; the

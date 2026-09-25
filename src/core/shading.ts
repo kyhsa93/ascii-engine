@@ -1,9 +1,13 @@
 import type { Shader } from './raster.ts'
+import type { Texture } from './texture.ts'
+import { sample } from './texture.ts'
 import type { Vec3 } from './vec3.ts'
 import { normalize, vec3 } from './vec3.ts'
 
 export interface LambertOptions {
   albedo?: Vec3
+  /** Multiplied into the albedo, read at the fragment's texture coordinates. */
+  map?: Texture
   /** Direction from the surface *toward* the light. Normalized on the way in. */
   light?: Vec3
   lightColor?: Vec3
@@ -25,6 +29,8 @@ export function lambert(options: LambertOptions = {}): Shader {
   const specular = options.specular ?? 0
   const shininess = options.shininess ?? 32
   const eye = options.eye ?? vec3(0, 0, 0)
+  const map = options.map
+  const texel = new Float32Array(3)
 
   return (f, out) => {
     const len = Math.hypot(f.nx, f.ny, f.nz) || 1
@@ -52,9 +58,19 @@ export function lambert(options: LambertOptions = {}): Shader {
       spec = specular * Math.pow(Math.max(0, nx * hx + ny * hy + nz * hz), shininess)
     }
 
-    out.r = Math.min(1, albedo.x * (ambient + diffuse * lightColor.x) + spec)
-    out.g = Math.min(1, albedo.y * (ambient + diffuse * lightColor.y) + spec)
-    out.b = Math.min(1, albedo.z * (ambient + diffuse * lightColor.z) + spec)
+    let ar = albedo.x
+    let ag = albedo.y
+    let ab = albedo.z
+    if (map) {
+      sample(map, f.u, f.v, texel)
+      ar *= texel[0]!
+      ag *= texel[1]!
+      ab *= texel[2]!
+    }
+
+    out.r = Math.min(1, ar * (ambient + diffuse * lightColor.x) + spec)
+    out.g = Math.min(1, ag * (ambient + diffuse * lightColor.y) + spec)
+    out.b = Math.min(1, ab * (ambient + diffuse * lightColor.z) + spec)
   }
 }
 

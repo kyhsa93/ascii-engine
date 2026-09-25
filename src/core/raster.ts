@@ -7,11 +7,14 @@
  * itself.
  */
 
-/** Floats per clip-space vertex: `x y z w  wx wy wz  nx ny nz`. */
-export const CLIP_STRIDE = 10
+/** Floats per clip-space vertex: `x y z w  wx wy wz  nx ny nz  u v`. */
+export const CLIP_STRIDE = 12
 
-/** Floats per projected vertex: `sx sy invW  wx wy wz nx ny nz` (all /w). */
-const SCREEN_STRIDE = 9
+/** How many of those are attributes to interpolate: everything after `x y z w`. */
+const ATTRIBUTES = CLIP_STRIDE - 4
+
+/** Floats per projected vertex: `sx sy invW` then the attributes, all /w. */
+const SCREEN_STRIDE = 3 + ATTRIBUTES
 
 export interface RenderTarget {
   readonly width: number
@@ -30,6 +33,9 @@ export interface Fragment {
   nx: number
   ny: number
   nz: number
+  /** Texture coordinates. Zero on a mesh that carries none. */
+  u: number
+  v: number
   /** Cell coordinates within the target. */
   cx: number
   cy: number
@@ -56,7 +62,7 @@ const clipIn = new Float32Array(8 * CLIP_STRIDE)
 const clipOut = new Float32Array(8 * CLIP_STRIDE)
 const screen = new Float32Array(8 * SCREEN_STRIDE)
 
-const frag: Fragment = { px: 0, py: 0, pz: 0, nx: 0, ny: 0, nz: 0, cx: 0, cy: 0, invW: 0 }
+const frag: Fragment = { px: 0, py: 0, pz: 0, nx: 0, ny: 0, nz: 0, u: 0, v: 0, cx: 0, cy: 0, invW: 0 }
 const surf: Surface = { r: 0, g: 0, b: 0, char: 0 }
 
 /**
@@ -153,6 +159,8 @@ function rasterize(
       frag.nx = (l0 * screen[a + 6]! + l1 * screen[b + 6]! + l2 * screen[c + 6]!) * w
       frag.ny = (l0 * screen[a + 7]! + l1 * screen[b + 7]! + l2 * screen[c + 7]!) * w
       frag.nz = (l0 * screen[a + 8]! + l1 * screen[b + 8]! + l2 * screen[c + 8]!) * w
+      frag.u = (l0 * screen[a + 9]! + l1 * screen[b + 9]! + l2 * screen[c + 9]!) * w
+      frag.v = (l0 * screen[a + 10]! + l1 * screen[b + 10]! + l2 * screen[c + 10]!) * w
       frag.cx = x
       frag.cy = y
       frag.invW = invW
@@ -195,7 +203,7 @@ export function submitTriangle(
     screen[s] = (clipOut[o]! * invW * 0.5 + 0.5) * target.width
     screen[s + 1] = (0.5 - clipOut[o + 1]! * invW * 0.5) * target.height
     screen[s + 2] = invW
-    for (let k = 0; k < 6; k++) screen[s + 3 + k] = clipOut[o + 4 + k]! * invW
+    for (let k = 0; k < ATTRIBUTES; k++) screen[s + 3 + k] = clipOut[o + 4 + k]! * invW
   }
 
   for (let i = 1; i + 1 < n; i++) {

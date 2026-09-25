@@ -42,8 +42,9 @@ import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { sdBox, sdSphere, smoothUnion, translate } from '../src/core/sdf.ts'
 import { lambert, unlit } from '../src/core/shading.ts'
+import { checker, fromAscii, parsePpm, sample, texture, writePpm } from '../src/core/texture.ts'
 import { Terminal, to256 } from '../src/term/ansi.ts'
-import { vec3 } from '../src/core/vec3.ts'
+import { cross, normalize, sub, vec3 } from '../src/core/vec3.ts'
 
 let failed = 0
 
@@ -85,13 +86,29 @@ interface Sample {
   nx: number
   ny: number
   nz: number
+  u: number
+  v: number
+  cx: number
+  cy: number
   invW: number
 }
 
 /** A shader that keeps a copy of every fragment it is handed. */
 function recorder(into: Sample[]): Shader {
   return (f, out) => {
-    into.push({ px: f.px, py: f.py, pz: f.pz, nx: f.nx, ny: f.ny, nz: f.nz, invW: f.invW })
+    into.push({
+      px: f.px,
+      py: f.py,
+      pz: f.pz,
+      nx: f.nx,
+      ny: f.ny,
+      nz: f.nz,
+      u: f.u,
+      v: f.v,
+      cx: f.cx,
+      cy: f.cy,
+      invW: f.invW,
+    })
     out.r = 1
     out.g = 1
     out.b = 1
@@ -520,16 +537,37 @@ test('parseObj fills in only the normals a file leaves out', () => {
 })
 
 test('parseObj treats two spellings of one vertex as one vertex', () => {
+  // The same triple written two completely different ways: once counting from
+  // the front and once from the back. Keying the vertex cache on the text of
+  // an index rather than on what it resolves to would make six vertices here.
+  const mesh = parseObj(`
+    v 0 0 0
+    v 1 0 0
+    v 1 1 0
+    vn 0 0 1
+    f 1//1 2//1 3//1
+    f -3//-1 -2//-1 -1//-1
+  `)
+  assert(mesh.positions.length / 3 === 3, `expected 3 vertices, got ${mesh.positions.length / 3}`)
+  assert(mesh.indices.length / 3 === 2, `expected 2 triangles, got ${mesh.indices.length / 3}`)
+})
+
+test('parseObj splits a vertex that two faces give different texture coordinates', () => {
+  // The other side of the same rule, and the reason the key is a triple: a
+  // texture seam is exactly one position appearing with two different uvs, and
+  // merging those would drag the seam across the face.
   const mesh = parseObj(`
     v 0 0 0
     v 1 0 0
     v 1 1 0
     vt 0 0
+    vt 1 0
     vn 0 0 1
-    f 1//1 2//1 3//1
-    f 1/1/1 2//1 3//1
+    f 1/1/1 2/1/1 3/1/1
+    f 1/2/1 2/1/1 3/1/1
   `)
-  assert(mesh.positions.length / 3 === 3, `expected 3 vertices, got ${mesh.positions.length / 3}`)
+  assert(mesh.positions.length / 3 === 4, `expected the seam vertex to split, got ${mesh.positions.length / 3}`)
+  assert(mesh.uvs !== undefined, 'texture coordinates should have been read')
 })
 
 test('writeObj and parseObj round-trip a mesh into the same picture', () => {
@@ -598,6 +636,197 @@ test('the shipped model loads and renders facing the camera', () => {
     camera.viewProjection(aspect),
     lambert({ albedo: vec3(0.9, 0.78, 0.55), specular: 0.4, shininess: 28, eye: camera.position }),
   )
+  fb.resolve(RAMPS.long)
+  console.log('\n' + fb.toString() + '\n')
+})
+
+console.log('\ntextures')
+
+test('texture coordinates are perspective-correct across a receding plane', () => {
+  // The test that separates a correct interpolator from an affine one, and the
+  // reason its ground truth is a ray-plane intersection rather than the
+  // fragment's own world position: position and uv ride the same interpolator,
+  // so comparing them to each other would pass with both of them wrong.
+  const width = 70
+  const height = 30
+  const camera = new Camera({ position: vec3(0, 1.5, 9), target: vec3(0, 0, -8), fovY: Math.PI / 3 })
+  const aspect = aspectFor(width, height, 0.5)
+
+  const samples: Sample[] = []
+  const fb = new Framebuffer(width, height)
+  fb.clear()
+  drawMesh(fb, plane(20, 1), identity(), camera.viewProjection(aspect), recorder(samples))
+  assert(samples.length > 400, `expected the plane to fill much of the frame, got ${samples.length}`)
+
+  // Affine and perspective-correct interpolation agree on a frustum that is
+  // nearly orthographic, so without a wide spread of depths this would pass
+  // for free.
+  let nearest = 0
+  let farthest = Infinity
+  for (const s of samples) {
+    nearest = Math.max(nearest, s.invW)
+    farthest = Math.min(farthest, s.invW)
+  }
+  assert(nearest / farthest > 4, `too little perspective to be a real test: ratio ${(nearest / farthest).toFixed(2)}`)
+
+  const forward = normalize(sub(camera.target, camera.position))
+  const right = normalize(cross(forward, camera.up))
+  const up = cross(right, forward)
+  const tanHalf = Math.tan(camera.fovY / 2)
+
+  let worst = 0
+  for (const s of samples) {
+    const sx = (((s.cx + 0.5) / width) * 2 - 1) * tanHalf * aspect
+    const sy = (1 - ((s.cy + 0.5) / height) * 2) * tanHalf
+    const dx = forward.x + right.x * sx + up.x * sy
+    const dy = forward.y + right.y * sx + up.y * sy
+    const dz = forward.z + right.z * sx + up.z * sy
+    // The ray need not be normalized: t scales out of the intersection.
+    const t = -camera.position.y / dy
+    const x = camera.position.x + dx * t
+    const z = camera.position.z + dz * t
+    worst = Math.max(worst, Math.abs(s.u - (x + 10) / 20), Math.abs(s.v - (z + 10) / 20))
+  }
+  assert(worst < 2e-3, `uv drifts from the ray-traced truth by ${worst.toFixed(5)}`)
+})
+
+test('nearest sampling picks the texel the coordinate lands in', () => {
+  const tex = texture(
+    2,
+    2,
+    new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1]),
+    { filter: 'nearest', wrap: 'clamp' },
+  )
+  const out = new Float32Array(3)
+  const at = (u: number, v: number) => {
+    sample(tex, u, v, out)
+    return [out[0]!, out[1]!, out[2]!].join(',')
+  }
+  assert(at(0.25, 0.25) === '1,0,0', `top-left should be red, got ${at(0.25, 0.25)}`)
+  assert(at(0.75, 0.25) === '0,1,0', `top-right should be green, got ${at(0.75, 0.25)}`)
+  assert(at(0.25, 0.75) === '0,0,1', `bottom-left should be blue, got ${at(0.25, 0.75)}`)
+  assert(at(0.75, 0.75) === '1,1,1', `bottom-right should be white, got ${at(0.75, 0.75)}`)
+})
+
+test('bilinear sampling is centred on the texel, not on its corner', () => {
+  // Texel centres sit at half-integer coordinates. Skip that half-texel shift
+  // and a texture slides by half a texel whenever it is magnified -- which is
+  // invisible on a photograph and obvious on a checkerboard.
+  const tex = texture(
+    2,
+    2,
+    new Float32Array([1, 0, 0, 0, 1, 0, 0, 0, 1, 1, 1, 1]),
+    { filter: 'bilinear', wrap: 'clamp' },
+  )
+  const out = new Float32Array(3)
+
+  sample(tex, 0.25, 0.25, out)
+  close(out[0]!, 1, 1e-6, 'a texel centre should return that texel exactly')
+  close(out[1]!, 0, 1e-6, 'a texel centre should return that texel exactly')
+
+  sample(tex, 0.5, 0.5, out)
+  close(out[0]!, 0.5, 1e-6, 'the middle of four texels averages them')
+  close(out[1]!, 0.5, 1e-6, 'the middle of four texels averages them')
+  close(out[2]!, 0.5, 1e-6, 'the middle of four texels averages them')
+})
+
+test('the three wrap modes disagree exactly where they should', () => {
+  const data = new Float32Array([0, 0, 0, 1, 1, 1])
+  const out = new Float32Array(3)
+  const read = (wrap: 'repeat' | 'clamp' | 'mirror', u: number) => {
+    sample(texture(2, 1, data, { filter: 'nearest', wrap }), u, 0.5, out)
+    return out[0]!
+  }
+
+  // One period along: repeat starts over, clamp holds the last texel, and
+  // mirror walks back the way it came.
+  close(read('repeat', 1.25), 0, 1e-6, 'repeat should return to the first texel')
+  close(read('clamp', 1.25), 1, 1e-6, 'clamp should hold the last texel')
+  close(read('mirror', 1.25), 1, 1e-6, 'mirror should be walking back down')
+  // And below zero, where clamp and repeat part company again.
+  close(read('repeat', -0.25), 1, 1e-6, 'repeat should wrap to the last texel')
+  close(read('clamp', -0.25), 0, 1e-6, 'clamp should hold the first texel')
+})
+
+test('checker alternates and stays crisp', () => {
+  const tex = checker(4)
+  assert(tex.filter === 'nearest', 'a checker blurred by bilinear filtering is not a checker')
+  const out = new Float32Array(3)
+  sample(tex, 0.125, 0.125, out)
+  const light = out[0]!
+  sample(tex, 0.375, 0.125, out)
+  const dark = out[0]!
+  assert(light > 0.5 && dark < 0.5, `neighbouring squares should differ, got ${light} and ${dark}`)
+})
+
+test('fromAscii reads characters back to the brightness they stand for', () => {
+  // The inverse of what resolve does: a picture drawn in characters becomes a
+  // texture that can be wrapped around a solid drawn in characters.
+  const tex = fromAscii('@ .', RAMPS.short)
+  assert(tex.width === 3 && tex.height === 1, `expected a 3x1 texture, got ${tex.width}x${tex.height}`)
+  close(tex.data[0]!, 1, 1e-6, 'the brightest ramp character is full brightness')
+  close(tex.data[3]!, 0, 1e-6, 'a space is black')
+  close(tex.data[6]!, 1 / (RAMPS.short.length - 1), 1e-6, 'the second ramp character is one step up')
+})
+
+test('ppm round-trips through the writer and the reader', () => {
+  const source = texture(3, 2, Float32Array.from({ length: 18 }, (_, i) => i / 17))
+  const back = parsePpm(writePpm(source))
+  assert(back.width === 3 && back.height === 2, `dimensions changed: ${back.width}x${back.height}`)
+  for (let i = 0; i < source.data.length; i++) {
+    close(back.data[i]!, source.data[i]!, 1 / 255, `sample ${i} after a round trip`)
+  }
+})
+
+test('the ppm reader handles comments and the ascii variant', () => {
+  const text = 'P3\n# written by hand\n2 1\n255\n255 0 0  0 128 255\n'
+  const tex = parsePpm(Uint8Array.from(text, (c) => c.charCodeAt(0)))
+  close(tex.data[0]!, 1, 1e-6, 'first pixel red')
+  close(tex.data[1]!, 0, 1e-6, 'first pixel green')
+  close(tex.data[5]!, 1, 1e-6, 'second pixel blue')
+})
+
+test('writeObj and parseObj round-trip texture coordinates', () => {
+  // OBJ measures v upward from the bottom and this engine measures it downward
+  // from the first row, so the axis is flipped on the way out and back. A flip
+  // applied once would survive every other test in here and show up only as an
+  // upside-down picture.
+  const original = cube(2)
+  assert(original.uvs !== undefined, 'the cube should carry texture coordinates')
+  const reloaded = parseObj(writeObj(original, 'cube'))
+  assert(reloaded.uvs !== undefined, 'texture coordinates did not survive the round trip')
+  assert(
+    reloaded.uvs!.length === original.uvs!.length,
+    `uv count changed: ${original.uvs!.length / 2} -> ${reloaded.uvs!.length / 2}`,
+  )
+  for (let i = 0; i < original.uvs!.length; i++) {
+    close(reloaded.uvs![i]!, original.uvs![i]!, 1e-6, `uv ${i}`)
+  }
+})
+
+test('a checkered cube shows one shade per face per square colour', () => {
+  // Flat shading gives a cube three shades, one per visible face. A checker
+  // with two colours must give exactly six -- more would mean the sampler is
+  // bleeding between squares, fewer that the map is not being read per
+  // fragment at all.
+  const fb = new Framebuffer(80, 36)
+  fb.clear(0, 0, 0)
+  const camera = new Camera({ position: vec3(2.6, 2.1, 3.6), fovY: Math.PI / 3.2 })
+  drawMesh(
+    fb,
+    cube(2),
+    identity(),
+    camera.viewProjection(aspectFor(80, 36, 0.5)),
+    lambert({ albedo: vec3(1, 0.9, 0.7), light: vec3(0.5, 0.8, 0.6), ambient: 0.12, map: checker(4) }),
+  )
+
+  const shades = new Set<string>()
+  for (let i = 0; i < fb.depth.length; i++) {
+    if (fb.depth[i]! <= 0) continue
+    shades.add(fb.color.slice(i * 3, i * 3 + 3).join(','))
+  }
+  assert(shades.size === 6, `expected 3 faces x 2 square colours, got ${shades.size} shades`)
+
   fb.resolve(RAMPS.long)
   console.log('\n' + fb.toString() + '\n')
 })

@@ -5,6 +5,8 @@ export interface Mesh {
   positions: Float32Array
   /** 3 floats per vertex, parallel to `positions`. */
   normals: Float32Array
+  /** 2 floats per vertex, parallel to `positions`. Absent on an untextured mesh. */
+  uvs?: Float32Array
   /** 3 indices per triangle, wound counter-clockwise when seen from outside. */
   indices: Uint32Array
 }
@@ -12,15 +14,18 @@ export interface Mesh {
 interface Builder {
   positions: number[]
   normals: number[]
+  uvs: number[]
   indices: number[]
 }
 
 function finish(b: Builder): Mesh {
-  return {
+  const mesh: Mesh = {
     positions: new Float32Array(b.positions),
     normals: new Float32Array(b.normals),
     indices: new Uint32Array(b.indices),
   }
+  if (b.uvs.length > 0) mesh.uvs = new Float32Array(b.uvs)
+  return mesh
 }
 
 export function cube(size = 1): Mesh {
@@ -37,12 +42,23 @@ export function cube(size = 1): Mesh {
     [[[-s, -s, -s], [s, -s, -s], [s, -s, s], [-s, -s, s]], [0, -1, 0]],
   ]
 
-  const b: Builder = { positions: [], normals: [], indices: [] }
+  // Corners are listed bottom-left, bottom-right, top-right, top-left, and
+  // `v = 0` is the first row of a texture, so the bottom of a face takes v = 1.
+  const cornerUv = [
+    [0, 1],
+    [1, 1],
+    [1, 0],
+    [0, 0],
+  ]
+
+  const b: Builder = { positions: [], normals: [], uvs: [], indices: [] }
   for (const [corners, n] of faces) {
     const base = b.positions.length / 3
-    for (const c of corners) {
+    for (let k = 0; k < corners.length; k++) {
+      const c = corners[k]!
       b.positions.push(c[0]!, c[1]!, c[2]!)
       b.normals.push(n[0]!, n[1]!, n[2]!)
+      b.uvs.push(cornerUv[k]![0]!, cornerUv[k]![1]!)
     }
     b.indices.push(base, base + 1, base + 2, base, base + 2, base + 3)
   }
@@ -50,7 +66,7 @@ export function cube(size = 1): Mesh {
 }
 
 export function sphere(radius = 1, segments = 32, rings = 20): Mesh {
-  const b: Builder = { positions: [], normals: [], indices: [] }
+  const b: Builder = { positions: [], normals: [], uvs: [], indices: [] }
   for (let i = 0; i <= rings; i++) {
     const phi = (i / rings) * Math.PI
     const sp = Math.sin(phi)
@@ -62,6 +78,9 @@ export function sphere(radius = 1, segments = 32, rings = 20): Mesh {
       const nz = sp * Math.sin(theta)
       b.normals.push(nx, ny, nz)
       b.positions.push(nx * radius, ny * radius, nz * radius)
+      // Rings run from the +y pole downward, which is also the direction a
+      // texture's rows run, so v needs no flip here.
+      b.uvs.push(j / segments, i / rings)
     }
   }
   const stride = segments + 1
@@ -75,7 +94,7 @@ export function sphere(radius = 1, segments = 32, rings = 20): Mesh {
 }
 
 export function torus(majorRadius = 1, minorRadius = 0.36, majorSegments = 48, minorSegments = 24): Mesh {
-  const b: Builder = { positions: [], normals: [], indices: [] }
+  const b: Builder = { positions: [], normals: [], uvs: [], indices: [] }
   for (let i = 0; i <= majorSegments; i++) {
     const u = (i / majorSegments) * Math.PI * 2
     const cu = Math.cos(u)
@@ -89,6 +108,7 @@ export function torus(majorRadius = 1, minorRadius = 0.36, majorSegments = 48, m
       const nz = cv * su
       b.normals.push(nx, ny, nz)
       b.positions.push(majorRadius * cu + minorRadius * nx, minorRadius * ny, majorRadius * su + minorRadius * nz)
+      b.uvs.push(i / majorSegments, j / minorSegments)
     }
   }
   const stride = minorSegments + 1
@@ -103,13 +123,14 @@ export function torus(majorRadius = 1, minorRadius = 0.36, majorSegments = 48, m
 
 /** A flat grid on the xz plane facing +y, centred on the origin. */
 export function plane(size = 1, divisions = 1): Mesh {
-  const b: Builder = { positions: [], normals: [], indices: [] }
+  const b: Builder = { positions: [], normals: [], uvs: [], indices: [] }
   const step = size / divisions
   const half = size / 2
   for (let i = 0; i <= divisions; i++) {
     for (let j = 0; j <= divisions; j++) {
       b.positions.push(-half + i * step, 0, -half + j * step)
       b.normals.push(0, 1, 0)
+      b.uvs.push(i / divisions, j / divisions)
     }
   }
   const stride = divisions + 1
@@ -161,30 +182,35 @@ export function computeNormals(positions: Float32Array, indices: Uint32Array): F
 }
 
 /**
- * Reads the subset of Wavefront OBJ that matters here: `v`, `vn` and `f`.
- * Faces with more than three corners are fanned, and a face that names a
- * position/normal pair the file has not used before gets its own vertex, so
- * hard edges stay hard.
+ * Reads the subset of Wavefront OBJ that matters here: `v`, `vt`, `vn` and
+ * `f`. Faces with more than three corners are fanned, and a face that names a
+ * position/texture/normal triple the file has not used before gets its own
+ * vertex, so hard edges and texture seams both stay sharp.
  */
 export function parseObj(text: string): Mesh {
   const v: number[] = []
+  const vt: number[] = []
   const vn: number[] = []
   const positions: number[] = []
   const normals: number[] = []
+  const uvs: number[] = []
   const indices: number[] = []
   const seen = new Map<string, number>()
   const hasNormal: boolean[] = []
+  let anyUv = false
 
   const resolve = (raw: number, count: number): number => (raw < 0 ? count + raw : raw - 1)
 
   const vertexFor = (token: string): number => {
     const parts = token.split('/')
     const pi = resolve(Number(parts[0]), v.length / 3)
+    const ti = parts[1] ? resolve(Number(parts[1]), vt.length / 2) : -1
     const ni = parts[2] ? resolve(Number(parts[2]), vn.length / 3) : -1
 
-    // Keyed on the resolved pair rather than the spelling: `1//1` and `1/1/1`
-    // name the same vertex, and caching the text would make two of it.
-    const key = `${pi}/${ni}`
+    // Keyed on the resolved triple rather than the spelling: `1//1` and
+    // `1/1/1` may name the same vertex, and caching the text would make two
+    // of it, while two faces that differ only in `vt` must stay two.
+    const key = `${pi}/${ti}/${ni}`
     const cached = seen.get(key)
     if (cached !== undefined) return cached
 
@@ -195,6 +221,15 @@ export function parseObj(text: string): Mesh {
       normals.push(vn[n] ?? 0, vn[n + 1] ?? 0, vn[n + 2] ?? 0)
     } else {
       normals.push(0, 0, 0)
+    }
+    if (ti >= 0) {
+      const t = ti * 2
+      // OBJ measures v upward from the bottom edge; this engine's textures
+      // are stored with v = 0 as the first row, so the axis flips here.
+      uvs.push(vt[t] ?? 0, 1 - (vt[t + 1] ?? 0))
+      anyUv = true
+    } else {
+      uvs.push(0, 0)
     }
     hasNormal.push(ni >= 0)
 
@@ -209,6 +244,7 @@ export function parseObj(text: string): Mesh {
     const parts = t.split(/\s+/)
     const kind = parts[0]
     if (kind === 'v') v.push(Number(parts[1]), Number(parts[2]), Number(parts[3]))
+    else if (kind === 'vt') vt.push(Number(parts[1]), Number(parts[2]))
     else if (kind === 'vn') vn.push(Number(parts[1]), Number(parts[2]), Number(parts[3]))
     else if (kind === 'f') {
       const corners = parts.slice(1).map(vertexFor)
@@ -236,32 +272,41 @@ export function parseObj(text: string): Mesh {
     }
   }
 
-  return { positions: pos, indices: idx, normals: normal }
+  const mesh: Mesh = { positions: pos, indices: idx, normals: normal }
+  if (anyUv) mesh.uvs = new Float32Array(uvs)
+  return mesh
 }
 
 /**
- * Serializes a mesh back to Wavefront OBJ with explicit normals.
+ * Serializes a mesh back to Wavefront OBJ with explicit normals, and texture
+ * coordinates when the mesh has them.
  *
- * Positions and normals are parallel arrays here, so every vertex writes one
- * `v` and one `vn` at the same index and faces can name them as `i//i`.
+ * Every attribute array here is parallel to `positions`, so each vertex emits
+ * one `v`, one `vn` and possibly one `vt` at the same index and a face can
+ * name them all with the same number.
  */
 export function writeObj(mesh: Mesh, name = 'mesh', precision = 6): string {
   const round = (n: number) => {
     const r = Number(n.toFixed(precision))
     return Object.is(r, -0) ? '0' : String(r)
   }
+  const uvs = mesh.uvs
   const lines = [`# ${name}`]
   for (let i = 0; i < mesh.positions.length; i += 3) {
     lines.push(`v ${round(mesh.positions[i]!)} ${round(mesh.positions[i + 1]!)} ${round(mesh.positions[i + 2]!)}`)
   }
+  if (uvs) {
+    // Back to the OBJ convention, measured upward from the bottom edge.
+    for (let i = 0; i < uvs.length; i += 2) lines.push(`vt ${round(uvs[i]!)} ${round(1 - uvs[i + 1]!)}`)
+  }
   for (let i = 0; i < mesh.normals.length; i += 3) {
     lines.push(`vn ${round(mesh.normals[i]!)} ${round(mesh.normals[i + 1]!)} ${round(mesh.normals[i + 2]!)}`)
   }
+  const corner = uvs ? (i: number) => `${i}/${i}/${i}` : (i: number) => `${i}//${i}`
   for (let i = 0; i < mesh.indices.length; i += 3) {
-    const a = mesh.indices[i]! + 1
-    const b = mesh.indices[i + 1]! + 1
-    const c = mesh.indices[i + 2]! + 1
-    lines.push(`f ${a}//${a} ${b}//${b} ${c}//${c}`)
+    lines.push(
+      `f ${corner(mesh.indices[i]! + 1)} ${corner(mesh.indices[i + 1]! + 1)} ${corner(mesh.indices[i + 2]! + 1)}`,
+    )
   }
   return lines.join('\n') + '\n'
 }

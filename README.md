@@ -30,6 +30,8 @@ src/core/     the renderer — no terminal, no DOM
   camera.ts     view and projection matrices, cell-aspect correction
   raster.ts     near-plane clipping, perspective divide, scanline fill
   renderer.ts   mesh -> triangles -> rasterizer
+  sdf.ts        signed distance primitives and the operations that combine them
+  march.ts      distance field -> rays -> the same framebuffer
   shading.ts    Lambert + Blinn-Phong, normal debug view
   framebuffer.ts  the character grid, and luminance -> glyph resolution
   ramp.ts       character ramps
@@ -57,6 +59,52 @@ by w before interpolation and multiplied back after.
 characters. `Framebuffer.resolve(ramp)` maps each cell's Rec. 709 luminance
 onto a ramp such as `" .:-=+*#%@"`. A shader that wants a specific glyph —
 a wireframe, a marker — can set `out.char` and `resolve` leaves it alone.
+
+## A second way in: distance fields
+
+Triangles are not the only way to describe a surface. A signed distance field
+is a function that answers "how far is this point from the surface" — negative
+inside, positive outside — and that one number is enough to render with,
+because it also says how far a ray may travel before it could hit anything.
+
+`marchScene` walks those rays into the *same* `Framebuffer`, through the same
+`Shader` type, so marched and triangulated geometry occlude each other in one
+frame:
+
+```ts
+import { marchScene } from './src/core/march.ts'
+import { sdBox, sdSphere, smoothUnion, translate } from './src/core/sdf.ts'
+
+drawMesh(fb, floor, identity(), vp, lambert({ albedo: vec3(0.3, 0.3, 0.35) }))
+marchScene(
+  fb,
+  smoothUnion(sdSphere(1.05), translate(sdBox(0.7, 0.7, 0.7), 0.9, 0.7, 0.4), 0.55),
+  camera,
+  aspect,
+  lambert({ albedo: vec3(0.95, 0.8, 0.55), specular: 0.4, eye: camera.position }),
+)
+```
+
+What makes the two paths agree is the depth convention. The rasterizer stores
+1/w, where w is distance along the *view axis* — not along the ray. A ray
+leaving the camera at an angle covers `t * cos(a)` of view axis per `t` of
+travel, and folding that factor in is the whole of the bridge. Leave it out
+and the marched surface tilts toward the camera at the edges of the frame,
+where it is least obvious and most wrong. `npm run check` pins it down by
+rendering a sphere both ways and comparing silhouette, coverage and depth.
+
+What the field buys over a mesh is combination. `smoothUnion` welds two shapes
+with a fillet that belongs to neither of them — near the seam the result is
+closer to the camera than either input, so the blend is a surface in its own
+right rather than two shapes drawn over each other. There is no mesh for the
+demo's `blend` subject; it exists only as a function.
+
+It is the expensive path: every cell walks its own ray, where the rasterizer
+touches a cell only if a triangle covers it. At 80x23 cells the demo's blend
+costs 2.1 ms a frame against 0.17 ms for a rasterized cube. Both demos give
+the marcher a shorter step budget than the default — which, measured, buys
+nothing at terminal size and cuts a 163x50 browser frame from 15.8 ms to
+6.7 ms, for a difference of 41 glyphs out of 8150.
 
 ## Writing a shader
 
@@ -106,7 +154,7 @@ Terminal and browser share the same scene.
 
 | key | what it does |
 | --- | --- |
-| `space` | cycle cube / sphere / torus |
+| `space` | cycle cube / sphere / torus / blend (the raymarched one) |
 | `r` | cycle character ramp |
 | `n` | toggle the normal debug view |
 | `p` | pause the spin |

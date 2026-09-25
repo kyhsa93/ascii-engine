@@ -33,9 +33,11 @@ import {
   torus,
   type Mesh,
 } from '../src/core/mesh.ts'
+import { marchScene } from '../src/core/march.ts'
 import { RAMPS } from '../src/core/ramp.ts'
 import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
+import { sdBox, sdSphere, smoothUnion, translate } from '../src/core/sdf.ts'
 import { lambert, unlit } from '../src/core/shading.ts'
 import { Terminal, to256 } from '../src/term/ansi.ts'
 import { vec3 } from '../src/core/vec3.ts'
@@ -417,6 +419,209 @@ test('computeNormals weights each face by its area', () => {
   const normals = computeNormals(positions, indices)
   close(Math.hypot(normals[0]!, normals[1]!, normals[2]!), 1, 1e-5, 'normals should come out unit length')
   assert(Math.abs(normals[1]!) > Math.abs(normals[2]!), 'the larger face should dominate the shared normal')
+})
+
+console.log('\nraymarching')
+
+test('a marched sphere lands where the rasterized one does', () => {
+  // The two paths share nothing but the camera and the depth convention, so
+  // agreeing on a silhouette means the ray generation, the aspect handling
+  // and the 1/w mapping all match the rasterizer's.
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const aspect = aspectFor(80, 40, 0.5)
+  const white = unlit(vec3(1, 1, 1))
+
+  const rastered = new Framebuffer(80, 40)
+  rastered.clear()
+  drawMesh(rastered, sphere(1, 64, 48), identity(), camera.viewProjection(aspect), white)
+
+  const marched = new Framebuffer(80, 40)
+  marched.clear()
+  marchScene(marched, sdSphere(1), camera, aspect, white)
+
+  const a = bounds(rastered)
+  const b = bounds(marched)
+  assert(Math.abs(a.w - b.w) <= 1 && Math.abs(a.h - b.h) <= 1, `silhouettes differ: ${a.w}x${a.h} vs ${b.w}x${b.h}`)
+
+  const ca = coverage(rastered)
+  const cb = coverage(marched)
+  assert(Math.abs(ca - cb) / ca < 0.05, `coverage differs by more than 5%: ${ca} vs ${cb}`)
+})
+
+test('marched depth agrees with rasterized depth to within a step', () => {
+  // Not just the outline: the surface has to sit at the same distance, or the
+  // two paths will fight over which is in front.
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const aspect = aspectFor(60, 30, 0.5)
+  const white = unlit(vec3(1, 1, 1))
+
+  const rastered = new Framebuffer(60, 30)
+  rastered.clear()
+  drawMesh(rastered, sphere(1, 96, 64), identity(), camera.viewProjection(aspect), white)
+
+  const marched = new Framebuffer(60, 30)
+  marched.clear()
+  marchScene(marched, sdSphere(1), camera, aspect, white)
+
+  let compared = 0
+  let worst = 0
+  for (let i = 0; i < rastered.depth.length; i++) {
+    if (rastered.depth[i]! <= 0 || marched.depth[i]! <= 0) continue
+    compared++
+    worst = Math.max(worst, Math.abs(1 / rastered.depth[i]! - 1 / marched.depth[i]!))
+  }
+  assert(compared > 200, `too few shared cells to judge: ${compared}`)
+  assert(worst < 0.05, `view-space depth differs by up to ${worst.toFixed(4)} units`)
+})
+
+test('a marched box lands where the rasterized cube does', () => {
+  // Flat faces render as broad areas of one shade, which is exactly what a
+  // wrong box field would also look like. Holding it against a cube mesh is
+  // what separates "that is what a box looks like" from a bug.
+  const camera = new Camera({ position: vec3(2.5, 2, 3.5), fovY: Math.PI / 3.2 })
+  const aspect = aspectFor(70, 34, 0.5)
+  const white = unlit(vec3(1, 1, 1))
+
+  const rastered = new Framebuffer(70, 34)
+  rastered.clear()
+  drawMesh(rastered, cube(1.4), identity(), camera.viewProjection(aspect), white)
+
+  const marched = new Framebuffer(70, 34)
+  marched.clear()
+  marchScene(marched, sdBox(0.7, 0.7, 0.7), camera, aspect, white)
+
+  const a = bounds(rastered)
+  const b = bounds(marched)
+  assert(Math.abs(a.w - b.w) <= 1 && Math.abs(a.h - b.h) <= 1, `silhouettes differ: ${a.w}x${a.h} vs ${b.w}x${b.h}`)
+
+  const ca = coverage(rastered)
+  const cb = coverage(marched)
+  assert(Math.abs(ca - cb) / ca < 0.05, `coverage differs by more than 5%: ${ca} vs ${cb}`)
+
+  let worst = 0
+  let compared = 0
+  for (let i = 0; i < rastered.depth.length; i++) {
+    if (rastered.depth[i]! <= 0 || marched.depth[i]! <= 0) continue
+    compared++
+    worst = Math.max(worst, Math.abs(1 / rastered.depth[i]! - 1 / marched.depth[i]!))
+  }
+  assert(compared > 200, `too few shared cells to judge: ${compared}`)
+  assert(worst < 0.05, `view-space depth differs by up to ${worst.toFixed(4)} units`)
+})
+
+test('marched and rasterized geometry occlude each other both ways', () => {
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const aspect = aspectFor(40, 20, 0.5)
+  const red = unlit(vec3(1, 0, 0))
+  const blue = unlit(vec3(0, 0, 1))
+
+  for (const marchFirst of [true, false]) {
+    // The quad sits at z = 0; the sphere is pushed behind it, so the quad
+    // must win no matter which path draws first.
+    const fb = new Framebuffer(40, 20)
+    fb.clear()
+    const drawQuad = () => drawMesh(fb, quad(4, 0), identity(), camera.viewProjection(aspect), red)
+    const drawBall = () => marchScene(fb, translate(sdSphere(1), 0, 0, -2), camera, aspect, blue)
+    if (marchFirst) {
+      drawBall()
+      drawQuad()
+    } else {
+      drawQuad()
+      drawBall()
+    }
+    const [r, , b] = colorAt(fb, 20, 10)
+    assert(r === 1 && b === 0, `march-first=${marchFirst}: the far sphere covered the near quad`)
+  }
+
+  // And the other way round: in front, the sphere has to win.
+  const fb = new Framebuffer(40, 20)
+  fb.clear()
+  drawMesh(fb, quad(4, 0), identity(), camera.viewProjection(aspect), red)
+  marchScene(fb, translate(sdSphere(0.6), 0, 0, 1.5), camera, aspect, blue)
+  const [r, , b] = colorAt(fb, 20, 10)
+  assert(r === 0 && b === 1, 'the near sphere did not cover the quad behind it')
+})
+
+test('gradient normals come out unit length and pointing outward', () => {
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const samples: Sample[] = []
+  const fb = new Framebuffer(50, 25)
+  fb.clear()
+  marchScene(fb, sdSphere(1), camera, aspectFor(50, 25, 0.5), recorder(samples))
+
+  assert(samples.length > 100, `expected a solid silhouette, got ${samples.length} hits`)
+  for (const s of samples) {
+    close(Math.hypot(s.nx, s.ny, s.nz), 1, 1e-3, 'normal length')
+    // On a sphere at the origin the outward normal is the position itself.
+    const dot = (s.nx * s.px + s.ny * s.py + s.nz * s.pz) / Math.hypot(s.px, s.py, s.pz)
+    assert(dot > 0.99, `normal is not radial: cos = ${dot.toFixed(4)}`)
+  }
+})
+
+test('an empty field draws nothing rather than a wall at max distance', () => {
+  // A march that runs out of steps has to report a miss. Reporting the last
+  // position instead paints a flat sheet across the whole frame.
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const fb = new Framebuffer(40, 20)
+  fb.clear()
+  marchScene(fb, translate(sdSphere(1), 0, 0, -400), camera, aspectFor(40, 20, 0.5), unlit(vec3(1, 1, 1)))
+  assert(coverage(fb) === 0, `expected an empty frame, got ${coverage(fb)} cells`)
+})
+
+test('smoothUnion pulls the seam in by exactly a quarter of k', () => {
+  // Two spheres with a gap between them. Halfway along, both fields are
+  // positive -- empty space -- and the blend has to reach into it, or the
+  // operation is just a union with extra arithmetic.
+  const left = translate(sdSphere(1), -1.4, 0, 0)
+  const right = translate(sdSphere(1), 1.4, 0, 0)
+  const gap = Math.min(left(0, 0, 0), right(0, 0, 0))
+  assert(gap > 0, `the spheres should not touch on their own, got ${gap}`)
+
+  // Where the two fields are equal the blend is at its strongest, and the
+  // polynomial's reach there is exactly k/4. That is also its budget: a k
+  // smaller than four times the gap cannot close the gap at all.
+  for (const k of [0.4, 0.9, 1.6]) {
+    close(smoothUnion(left, right, k)(0, 0, 0), gap - k / 4, 1e-9, `reach at k=${k}`)
+  }
+
+  // Given enough of it, the neck goes solid -- a surface neither sphere has.
+  assert(smoothUnion(left, right, 2)(0, 0, 0) < 0, `k = 2 should close a gap of ${gap.toFixed(2)}`)
+
+  // Far from the seam the blend must not disturb the original surfaces.
+  close(smoothUnion(left, right, 0.9)(-1.4, 0, 3), left(-1.4, 0, 3), 1e-9, 'the blend leaked away from the seam')
+})
+
+test('sdBox reports true distances inside, on and off the surface', () => {
+  // The box is the one primitive whose field is easy to get subtly wrong --
+  // too large a value makes rays overstep and punch through corners, too
+  // small makes them crawl.
+  const box = sdBox(0.7, 0.7, 0.7)
+  close(box(0, 0, 0), -0.7, 1e-9, 'the centre is half an extent from the nearest face')
+  close(box(0.7, 0, 0), 0, 1e-9, 'a face should sit exactly on the surface')
+  close(box(1.7, 0, 0), 1, 1e-9, 'straight out from a face')
+  close(box(1.7, 1.7, 0), Math.SQRT2, 1e-9, 'diagonally out from an edge')
+  close(box(1.7, 1.7, 1.7), Math.sqrt(3), 1e-9, 'diagonally out from a corner')
+  close(box(0, 0.3, 0), -0.4, 1e-9, 'inside, the nearest face is the answer')
+})
+
+test('a marched scene renders a gradient over its blend', () => {
+  const camera = new Camera({ position: vec3(2.4, 1.8, 3.4), fovY: Math.PI / 3.2 })
+  const fb = new Framebuffer(70, 30)
+  fb.clear(0, 0, 0)
+  const field = smoothUnion(sdSphere(1.05), translate(sdBox(0.7, 0.7, 0.7), 0.9, 0.7, 0.4), 0.55)
+  marchScene(
+    fb,
+    field,
+    camera,
+    aspectFor(70, 30, 0.5),
+    lambert({ albedo: vec3(0.95, 0.8, 0.55), specular: 0.4, shininess: 20, eye: camera.position }),
+  )
+  fb.resolve(RAMPS.long)
+
+  const glyphs = new Set<number>()
+  for (let i = 0; i < fb.chars.length; i++) if (fb.depth[i]! > 0) glyphs.add(fb.chars[i]!)
+  assert(glyphs.size >= 8, `expected a smooth gradient, got ${glyphs.size} distinct glyphs`)
+  console.log('\n' + fb.toString() + '\n')
 })
 
 console.log('\ncharacter output')

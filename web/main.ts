@@ -1,16 +1,39 @@
 import { Camera, aspectFor, fitDistance } from '../src/core/camera.ts'
 import { multiply, rotationX, rotationY } from '../src/core/mat4.ts'
-import { boundingRadius, cube, sphere, torus } from '../src/core/mesh.ts'
+import { marchScene } from '../src/core/march.ts'
+import { boundingRadius, cube, sphere, torus, type Mesh } from '../src/core/mesh.ts'
 import { RAMPS, type RampName } from '../src/core/ramp.ts'
 import { drawMesh } from '../src/core/renderer.ts'
+import { rotateY, sdBox, sdSphere, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { lambert, normalColor } from '../src/core/shading.ts'
 import { vec3 } from '../src/core/vec3.ts'
 import { PreSurface } from '../src/web/pre.ts'
 
-const shapes = [
-  { name: 'cube', mesh: cube(2) },
-  { name: 'sphere', mesh: sphere(1.3) },
-  { name: 'torus', mesh: torus(1.1, 0.42) },
+/** Something to look at: either triangles or a distance field. */
+type Subject =
+  | { name: string; radius: number; mesh: Mesh }
+  | { name: string; radius: number; field: (spin: number) => Sdf }
+
+/**
+ * A shorter step budget than the default. Every cell of a marched frame walks
+ * its own ray and a browser grid is several times the size of a terminal one,
+ * so this is where the budget matters: 6.7 ms a frame against 15.8 at 163x50
+ * cells, for a difference of 41 glyphs out of 8150.
+ */
+const MARCH = { maxSteps: 64, epsilon: 3e-3 }
+
+const shapes: Subject[] = [
+  { name: 'cube', radius: boundingRadius(cube(2)), mesh: cube(2) },
+  { name: 'sphere', radius: 1.3, mesh: sphere(1.3) },
+  { name: 'torus', radius: 1.52, mesh: torus(1.1, 0.42) },
+  {
+    // A sphere and a box welded by a fillet that belongs to neither of them.
+    // There is no mesh for this shape: it exists only as a function.
+    name: 'blend',
+    radius: 2.4,
+    field: (spin) =>
+      rotateY(smoothUnion(sdSphere(1.05), translate(sdBox(0.7, 0.7, 0.7), 0.9, 0.7, 0.4), 0.55), spin),
+  },
 ]
 const rampNames = Object.keys(RAMPS) as RampName[]
 
@@ -109,7 +132,8 @@ function frame(now: number): void {
   fb.clear(0.02, 0.02, 0.05)
 
   const aspect = aspectFor(fb.width, fb.height, surface.cellAspect)
-  camera.orbit(yaw, pitch, fitDistance(boundingRadius(shapes[shape]!.mesh), camera.fovY, aspect) * zoom)
+  const subject = shapes[shape]!
+  camera.orbit(yaw, pitch, fitDistance(subject.radius, camera.fovY, aspect) * zoom)
   const vp = camera.viewProjection(aspect)
   const model = multiply(rotationY(spin), rotationX(spin * 0.6))
 
@@ -124,7 +148,12 @@ function frame(now: number): void {
         eye: camera.position,
       })
 
-  drawMesh(fb, shapes[shape]!.mesh, model, vp, shader)
+  // Two paths into one framebuffer. The mesh turns by a model matrix; the
+  // field has no vertices to move, so it turns by being sampled in a rotated
+  // frame instead.
+  if ('mesh' in subject) drawMesh(fb, subject.mesh, model, vp, shader)
+  else marchScene(fb, subject.field(spin), camera, aspect, shader, MARCH)
+
   fb.resolve(RAMPS[rampNames[rampIndex]!])
   surface.present(fb)
 

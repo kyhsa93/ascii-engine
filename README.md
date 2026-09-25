@@ -404,6 +404,44 @@ Two decisions worth stating:
   puts a sphere beyond the lamp and requires it to change nothing, and the
   same sphere between surface and lamp and requires it to block.
 
+## March bounds
+
+`marchScene` takes an optional sphere the field's surface is known to lie
+inside. Rays that miss it are dropped before a single sample is taken, and the
+rest start at its near intersection and stop at its far one.
+
+```ts
+marchScene(target, field, camera, aspect, shader, {
+  bounds: { radius: subject.radius + 0.05 },
+})
+```
+
+The caller has to supply it, because a field is an opaque function and nothing
+in the engine can look at `(x, y, z) => number` and see how big it is.
+
+Why it is worth having, measured before it was written: on the browser grid,
+between 56% and 69% of every field evaluation in a frame belonged to rays that
+never come near the subject at all. Those are most of the picture, and each was
+spending ten or more samples to discover empty space. The rays that crawl along
+a silhouette are inside the bound and are not helped by it — they were never
+the expensive half, which is the sort of thing an average hides and a
+distribution does not. With bounds on, the demo shapes need 70% to 84% fewer
+evaluations.
+
+Two things to know before using it.
+
+- **The bound must contain the surface.** Too large only costs time; too small
+  silently deletes whatever falls outside it, and the loss reads as a modelling
+  mistake rather than a missing bound. This is not theoretical — the first
+  version of the suite's own blend bound was 0.164 short, and the march began
+  *underneath* the surface and reported a hit 0.24 too deep.
+- **An exact radius is already too small.** A march calls anything within
+  `epsilon` of the surface a hit, so the silhouette it draws is the shape
+  inflated by that much, while the ray/sphere test is exact geometry. A unit
+  sphere bounded at exactly 1 loses four rim cells, every one of them a ray
+  passing 1.000454 from the centre — outside the sphere, inside the epsilon. At
+  1.001 nothing is lost. Leave at least `epsilon` of clearance.
+
 ## Writing a shader
 
 A shader is a plain function. It is handed the interpolated fragment and a

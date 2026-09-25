@@ -1,6 +1,7 @@
 import type { Camera } from './camera.ts'
 import type { Fragment, RenderTarget, Shader, Surface } from './raster.ts'
 import type { Sdf } from './sdf.ts'
+import type { Vec3 } from './vec3.ts'
 import { cross, normalize, sub } from './vec3.ts'
 
 export interface MarchOptions {
@@ -10,6 +11,32 @@ export interface MarchOptions {
   epsilon?: number
   /** Stop looking past this distance. Defaults to the camera's far plane. */
   maxDistance?: number
+  /**
+   * A sphere the field's surface is known to lie entirely inside.
+   *
+   * Given one, a ray is clipped to it before a single sample is taken: rays
+   * that miss the sphere are dropped outright, and the rest start at the
+   * sphere's near intersection and stop at its far one.
+   *
+   * The caller has to supply this because a field is an opaque function --
+   * nothing here can look at `(x, y, z) => number` and see how big it is. The
+   * bound must genuinely contain the surface: too large only costs time, but
+   * too small silently deletes whatever falls outside it, and the loss looks
+   * like a modelling mistake rather than a missing bound.
+   *
+   * Leave `epsilon` of clearance, because a radius that is merely *exact* is
+   * already too small. A march calls anything within `epsilon` of the surface
+   * a hit, so the silhouette it draws is the shape inflated by that much,
+   * while this test is exact geometry and knows nothing of the margin.
+   * Measured on a unit sphere bounded at exactly 1: four rim cells are lost,
+   * every one of them a ray passing 1.000454 from the centre -- outside the
+   * sphere, inside the epsilon. At 1.001 nothing is lost.
+   */
+  bounds?: {
+    radius: number
+    /** Defaults to the origin, which is where every primitive here is built. */
+    center?: Vec3
+  }
 }
 
 // A distance field has no vertices, so it has neither texture coordinates nor
@@ -59,6 +86,15 @@ export function marchScene(
   const ey = camera.position.y
   const ez = camera.position.z
 
+  // Camera to the centre of the bound, constant for the frame. Everything the
+  // ray/sphere test needs beyond this is two dot products and a square root.
+  const bound = options.bounds
+  const radius2 = bound ? bound.radius * bound.radius : 0
+  const ocx = (bound?.center?.x ?? 0) - ex
+  const ocy = (bound?.center?.y ?? 0) - ey
+  const ocz = (bound?.center?.z ?? 0) - ez
+  const oc2 = ocx * ocx + ocy * ocy + ocz * ocz
+
   const { width, height, chars, color, depth } = target
 
   for (let y = 0; y < height; y++) {
@@ -79,9 +115,28 @@ export function marchScene(
       const existing = depth[idx]!
       // Anything already drawn in this cell caps how far the ray is worth
       // following: past that point the march could only find a loser.
-      const limit = existing > 0 ? Math.min(maxDistance, 1 / (existing * cosA)) : maxDistance
+      let limit = existing > 0 ? Math.min(maxDistance, 1 / (existing * cosA)) : maxDistance
 
       let t = camera.near / cosA
+
+      // Clip the ray to the bound before sampling anything. Measured on the
+      // browser grid, between 56% and 69% of every field evaluation in a frame
+      // was spent by rays that never come near the subject at all -- they are
+      // most of the picture, and each one was costing ten or more samples to
+      // discover empty space. The near-silhouette rays that crawl are inside
+      // the bound and this does not help them; they were never the expensive
+      // half, which is why the split was worth measuring before writing it.
+      if (bound) {
+        const tca = ocx * dx + ocy * dy + ocz * dz
+        const d2 = oc2 - tca * tca
+        if (d2 > radius2) continue
+        const thc = Math.sqrt(radius2 - d2)
+        // Wholly behind the near plane, or behind what is already drawn here.
+        if (tca + thc <= t) continue
+        if (tca - thc > t) t = tca - thc
+        limit = Math.min(limit, tca + thc)
+      }
+
       let hit = -1
       for (let step = 0; step < maxSteps && t <= limit; step++) {
         const d = field(ex + dx * t, ey + dy * t, ez + dz * t)

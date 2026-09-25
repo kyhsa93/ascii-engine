@@ -36,12 +36,12 @@ import {
   writeObj,
   type Mesh,
 } from '../src/core/mesh.ts'
-import { marchScene } from '../src/core/march.ts'
+import { marchScene, type MarchOptions } from '../src/core/march.ts'
 import { drawAxes, drawLine3, drawText, label3 } from '../src/core/overlay.ts'
 import { RAMPS } from '../src/core/ramp.ts'
 import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
-import { sdBox, sdSphere, smoothUnion, translate } from '../src/core/sdf.ts'
+import { sdBox, sdSphere, smoothUnion, translate, type Sdf } from '../src/core/sdf.ts'
 import { shadowFrom, shadowFromPoint } from '../src/core/shadow.ts'
 import { lambert, unlit, wireframe } from '../src/core/shading.ts'
 import { Supersampler } from '../src/core/supersample.ts'
@@ -1037,6 +1037,206 @@ test('a marched scene renders a gradient over its blend', () => {
   for (let i = 0; i < fb.chars.length; i++) if (fb.depth[i]! > 0) glyphs.add(fb.chars[i]!)
   assert(glyphs.size >= 8, `expected a smooth gradient, got ${glyphs.size} distinct glyphs`)
   console.log('\n' + fb.toString() + '\n')
+})
+
+console.log('\nmarch bounds')
+
+/**
+ * Every shape in these checks, with a sphere about the origin that holds it.
+ *
+ * The radii are measured, not guessed. The first version of this list guessed
+ * 2.2 for the blend, which is 0.164 short of the 2.364 it actually needs -- the
+ * smoothed box sits off-centre and the blend reaches further than either of its
+ * parts. The march then began *inside* the surface and reported a hit 0.24
+ * deep, which is exactly the silent loss the option's own documentation warns
+ * about, arriving in the check that was supposed to catch it.
+ */
+const BOUNDED: [string, number, Sdf][] = [
+  // Each radius clears the surface rather than touching it. A bound equal to
+  // the shape's own radius puts the ray's first sample exactly on the surface,
+  // which is a different question from the one these checks ask; it gets its
+  // own check below.
+  ['sphere', 1.1, sdSphere(1)],
+  ['box', 1.74, sdBox(1, 1, 1)],
+  ['blend', 2.4, smoothUnion(sdSphere(1.05), translate(sdBox(0.7, 0.7, 0.7), 0.9, 0.7, 0.4), 0.55)],
+]
+
+/** Renders `field` twice and reports how the two frames and their costs differ. */
+function marchTwice(
+  field: Sdf,
+  options: MarchOptions,
+  radius: number,
+  width = 70,
+  height = 34,
+): { cells: number; silhouette: number; worstDepth: number; evalsWithout: number; evalsWith: number } {
+  // Framed the way the demos frame a subject, because the saving depends on
+  // how much of the grid the subject covers and a camera pushed up against it
+  // measures a case nothing actually renders. The same blend saves 36% from
+  // two units away and 76% from where `fitDistance` puts the camera.
+  const aspect = aspectFor(width, height, 0.5)
+  const camera = new Camera({ position: vec3(0, 0, 5), fovY: Math.PI / 3.2 })
+  camera.orbit(-0.6, 0.35, fitDistance(radius, camera.fovY, aspect))
+  const white = unlit(vec3(1, 1, 1))
+
+  const run = (opts: MarchOptions) => {
+    let evals = 0
+    const counted: Sdf = (x, y, z) => {
+      evals++
+      return field(x, y, z)
+    }
+    const fb = new Framebuffer(width, height)
+    fb.clear()
+    marchScene(fb, counted, camera, aspect, white, opts)
+    return { fb, evals }
+  }
+
+  // `exactOptionalPropertyTypes` is on, so an unbounded render is one with the
+  // key absent rather than set to undefined.
+  const { bounds: _bounds, ...unbounded } = options
+  const plain = run(unbounded)
+  const bounded = run(options)
+
+  let cells = 0
+  let silhouette = 0
+  let worstDepth = 0
+  for (let i = 0; i < plain.fb.depth.length; i++) {
+    const a = plain.fb.depth[i]!
+    const b = bounded.fb.depth[i]!
+    if (a > 0 !== b > 0) silhouette++
+    else if (a > 0 && a !== b) worstDepth = Math.max(worstDepth, Math.abs(1 / a - 1 / b))
+
+    const sameChar = plain.fb.chars[i] === bounded.fb.chars[i]
+    const o = i * 3
+    const sameColor =
+      plain.fb.color[o] === bounded.fb.color[o] &&
+      plain.fb.color[o + 1] === bounded.fb.color[o + 1] &&
+      plain.fb.color[o + 2] === bounded.fb.color[o + 2]
+    if (!(a === b && sameChar && sameColor)) cells++
+  }
+  return { cells, silhouette, worstDepth, evalsWithout: plain.evals, evalsWith: bounded.evals }
+}
+
+test('a bound that holds the surface draws the same silhouette', () => {
+  // Not "the same frame": a bounded ray starts at the sphere's entry point
+  // rather than the near plane, so sphere tracing stops at a slightly
+  // different place along the same ray and the depth moves by up to epsilon.
+  // Measured, the gap is 8.7e-4 against an epsilon of 1e-3 -- termination
+  // noise, not geometry. What must not move at all is which cells are hit,
+  // because losing or gaining one means the clipping is wrong.
+  //
+  // Every shape is marched before anything is asserted. Asserting inside the
+  // loop stops at the first failure and leaves the rest looking like passes,
+  // which is how the blend's bad radius hid behind the sphere's for a round.
+  const results = BOUNDED.map(
+    ([name, radius, field]) => [name, marchTwice(field, { bounds: { radius } }, radius)] as const,
+  )
+
+  const lost = results.filter(([, r]) => r.silhouette > 0)
+  assert(
+    lost.length === 0,
+    `silhouette changed: ${lost.map(([n, r]) => `${n} by ${r.silhouette} cells`).join(', ')}`,
+  )
+
+  const EPSILON = 1e-3 // marchScene's default
+  const drifted = results.filter(([, r]) => r.worstDepth > EPSILON)
+  assert(
+    drifted.length === 0,
+    `depth moved further than one epsilon: ${drifted
+      .map(([n, r]) => `${n} by ${r.worstDepth.toExponential(2)}`)
+      .join(', ')}`,
+  )
+})
+
+test('a bound centred away from the origin follows the shape it holds', () => {
+  // The centre has to be used, not assumed. An offset shape with a matching
+  // offset bound is identical; with the bound left at the origin it is not,
+  // which is what shows the centre is read at all.
+  const offset = translate(sdSphere(0.8), 1.5, -0.4, 0.6)
+  const moved = marchTwice(offset, { bounds: { radius: 0.9, center: vec3(1.5, -0.4, 0.6) } }, 2.4)
+  assert(moved.silhouette === 0, `${moved.silhouette} cells gained or lost with a correctly placed bound`)
+  assert(moved.worstDepth <= 1e-3, `depth moved ${moved.worstDepth.toExponential(2)} with a correctly placed bound`)
+
+  const stayed = marchTwice(offset, { bounds: { radius: 0.9 } }, 2.4)
+  assert(stayed.silhouette > 0, 'a bound left at the origin still drew the offset sphere: the centre is ignored')
+})
+
+test('a bound too small to hold the surface loses part of it', () => {
+  // The falsification for the check above. If a wrong bound cost nothing
+  // visible, "same silhouette" would be proving nothing about the clipping.
+  //
+  // This is not hypothetical: the blend's radius in this very list was 0.164
+  // too small to begin with, and the damage was not a missing edge but a march
+  // that began underneath the surface and reported a hit 0.24 too deep. So a
+  // bad bound counts as caught if it moves the silhouette *or* drags the depth
+  // well past the epsilon that honest termination noise lives in.
+  const kept = BOUNDED.map(
+    ([name, radius, field]) => [name, marchTwice(field, { bounds: { radius: radius * 0.5 } }, radius)] as const,
+  )
+  const unharmed = kept.filter(([, r]) => r.silhouette === 0 && r.worstDepth <= 1e-3)
+  assert(
+    unharmed.length === 0,
+    `halving the bound went unnoticed for ${unharmed.map(([n]) => n).join(', ')}, so the bound is not being applied`,
+  )
+})
+
+test('the bound is what most rays cost, not the step budget', () => {
+  // The measurement that motivated this: on the browser grid, 56% to 69% of
+  // every field evaluation in a frame belonged to rays that never come near
+  // the subject. Those rays now cost a dot product and no samples at all, so
+  // the saving is asserted here rather than written into a comment -- three
+  // comments in this repo have already turned out wrong the moment they were
+  // measured.
+  const savings = BOUNDED.map(([name, radius, field]) => {
+    const { evalsWithout, evalsWith } = marchTwice(field, { bounds: { radius } }, radius)
+    return [name, 1 - evalsWith / evalsWithout] as const
+  })
+  const weak = savings.filter(([, saved]) => saved <= 0.4)
+  assert(
+    weak.length === 0,
+    `the bound saved too little: ${weak.map(([n, s]) => `${n} ${(s * 100).toFixed(0)}%`).join(', ')}`,
+  )
+})
+
+test('an exact radius is already too small a bound, by one epsilon', () => {
+  // The reason `bounds` asks for clearance rather than the true radius, and
+  // the check that stops the next person from "tidying" the margin away.
+  //
+  // A march calls anything within epsilon of the surface a hit, so the shape
+  // it draws is inflated by that much; the ray/sphere test is exact and knows
+  // nothing about the margin. Bounded at exactly 1, a unit sphere loses four
+  // rim cells, and every one of them is a ray passing 1.000454 from the centre
+  // -- genuinely outside the sphere and genuinely inside the epsilon. This is
+  // not a defect in the clipping; it is what epsilon means.
+  const exact = marchTwice(sdSphere(1), { bounds: { radius: 1 } }, 1)
+  assert(
+    exact.silhouette > 0,
+    'an exact bound lost no cells, so either epsilon changed or the bound is not being applied',
+  )
+
+  // A hair of clearance -- less than epsilon itself -- and the rim comes back.
+  const cleared = marchTwice(sdSphere(1), { bounds: { radius: 1.001 } }, 1)
+  assert(cleared.silhouette === 0, `epsilon of clearance still lost ${cleared.silhouette} cells`)
+})
+
+test('a bound the camera cannot see costs no samples whatsoever', () => {
+  // Every ray misses, so the honest cost of the frame is zero evaluations --
+  // not "few". A loop that still sampled once per ray would pass a "much
+  // cheaper" assertion and fail this one.
+  const camera = new Camera({ position: vec3(0, 0, 4), fovY: Math.PI / 4 })
+  const aspect = aspectFor(40, 20, 0.5)
+  let evals = 0
+  const counted: Sdf = (x, y, z) => {
+    evals++
+    return sdSphere(1)(x, y, z)
+  }
+  const fb = new Framebuffer(40, 20)
+  fb.clear()
+  // Behind the camera, and bounded there.
+  marchScene(fb, translate(counted, 0, 0, 20), camera, aspect, unlit(vec3(1, 1, 1)), {
+    bounds: { radius: 1, center: vec3(0, 0, 20) },
+  })
+  assert(evals === 0, `expected no field evaluations for a subject behind the camera, got ${evals}`)
+  assert(coverage(fb) === 0, 'something was drawn for a subject behind the camera')
 })
 
 console.log('\nshadows')

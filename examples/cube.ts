@@ -60,6 +60,17 @@ const FLOOR = plane(40, 1)
 const MARCH = { maxSteps: 64, epsilon: 3e-3 }
 
 /**
+ * Clearance added to a subject's radius before it is used as a march bound.
+ *
+ * A march calls anything within `epsilon` of the surface a hit, so the shape it
+ * draws is slightly larger than the shape itself, and a bound of exactly the
+ * right radius clips that rim away. Comfortably more than `MARCH.epsilon`,
+ * because the radii here are rounded up by as little as 0.001 -- the sphere's
+ * declared 1.3 against a surface that reaches 1.299.
+ */
+const BOUND_SLACK = 0.05
+
+/**
  * Sub-samples per cell along each axis when antialiasing is on: four in all.
  *
  * The obvious guess is that four samples cost four times as much, and they do
@@ -289,7 +300,15 @@ const loop = runLoop((dt) => {
   // field has no vertices to move, so it turns by being sampled in a rotated
   // frame instead.
   if (subject.mesh) drawMesh(target, subject.mesh, model, vp, shader)
-  else marchScene(target, subject.field(spin), camera, aspect, shader, MARCH)
+  else
+    marchScene(target, subject.field(spin), camera, aspect, shader, {
+      ...MARCH,
+      // Every subject is modelled about the origin and already declares the
+      // radius that frames it, so the bound costs nothing to supply. Measured,
+      // it drops field evaluations by 70% to 84% depending on the shape --
+      // most of a marched frame was rays discovering empty space.
+      bounds: { radius: subject.radius + BOUND_SLACK },
+    })
 
   if (target !== fb && sampler) sampler.resolveInto(fb)
 

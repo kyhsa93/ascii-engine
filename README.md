@@ -369,6 +369,41 @@ depth-tested behaviour stays for lines that really are part of the scene.
 The demos also caption the subject with `drawText` in a corner rather than a
 label on it, since a projected point can leave the frame and a corner cannot.
 
+## Point lights
+
+`lambert` takes one directional light and any number of point lights on top of
+it. The two differ in more than placement: a lamp's direction is recomputed
+for every fragment, so two surfaces either side of it are lit from opposite
+sides — something a direction cannot do — and its contribution falls off.
+
+```ts
+import { shadowFromPoint } from './src/core/shadow.ts'
+
+lambert({
+  albedo: vec3(0.9, 0.85, 0.75),
+  points: [{
+    position: lamp,
+    intensity: 3.5,
+    range: 9,
+    shadow: shadowFromPoint(field, lamp),
+  }],
+})
+```
+
+Two decisions worth stating:
+
+- **The falloff is a windowed inverse square.** A plain `1/d²` never quite
+  reaches zero, so every lamp would cost every fragment in the scene forever
+  and "range" would mean nothing. The window multiplies it by
+  `(1 - (d/range)⁴)²`, which is zero *at* the range rather than merely small
+  there — the check asserts exactly zero at and past it, and asserts that far
+  from the range the physics survives: twice the distance, a quarter the
+  light.
+- **A lamp's shadow ray stops at the lamp.** Marching past it finds whatever
+  is behind the light and darkens a surface the light does reach. The check
+  puts a sphere beyond the lamp and requires it to change nothing, and the
+  same sphere between surface and lamp and requires it to block.
+
 ## Writing a shader
 
 A shader is a plain function. It is handed the interpolated fragment and a

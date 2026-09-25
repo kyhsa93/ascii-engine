@@ -5,10 +5,37 @@ import { sample } from './texture.ts'
 import type { Vec3 } from './vec3.ts'
 import { normalize, vec3 } from './vec3.ts'
 
+export interface PointLight {
+  /** Where the light is, in world space. */
+  position: Vec3
+  color?: Vec3
+  /** Brightness at one unit of distance, before the range window. */
+  intensity?: number
+  /**
+   * Distance at which the light reaches exactly zero.
+   *
+   * A plain inverse square never quite ends, so every light would cost every
+   * fragment in the scene forever. The falloff is windowed to reach zero *at*
+   * the range rather than merely near it, which is what makes the range a
+   * bound worth testing against.
+   */
+  range?: number
+  /** Occlusion for this light alone; build it with `shadowFromPoint`. */
+  shadow?: Occlusion
+}
+
 export interface LambertOptions {
   albedo?: Vec3
   /** Multiplied into the albedo, read at the fragment's texture coordinates. */
   map?: Texture
+  /**
+   * Point lights, added on top of the directional one.
+   *
+   * Two things separate these from `light`: the direction is recomputed per
+   * fragment, so two surfaces either side of a lamp are lit from opposite
+   * sides, and the contribution falls off with distance.
+   */
+  points?: PointLight[]
   /**
    * How much of the light reaches each point. Scales the diffuse and specular
    * terms but never the ambient one — ambient is the light that arrives from
@@ -38,6 +65,7 @@ export function lambert(options: LambertOptions = {}): Shader {
   const eye = options.eye ?? vec3(0, 0, 0)
   const map = options.map
   const shadow = options.shadow
+  const points = options.points ?? []
   const texel = new Float32Array(3)
 
   return (f, out) => {
@@ -46,24 +74,73 @@ export function lambert(options: LambertOptions = {}): Shader {
     const ny = f.ny / len
     const nz = f.nz / len
 
-    const diffuse = Math.max(0, nx * l.x + ny * l.y + nz * l.z)
-    let spec = 0
-    if (specular > 0 && diffuse > 0) {
-      let vx = eye.x - f.px
-      let vy = eye.y - f.py
-      let vz = eye.z - f.pz
-      const vlen = Math.hypot(vx, vy, vz) || 1
-      vx /= vlen
-      vy /= vlen
-      vz /= vlen
-      let hx = l.x + vx
-      let hy = l.y + vy
-      let hz = l.z + vz
+    let vx = eye.x - f.px
+    let vy = eye.y - f.py
+    let vz = eye.z - f.pz
+    const vlen = Math.hypot(vx, vy, vz) || 1
+    vx /= vlen
+    vy /= vlen
+    vz /= vlen
+
+    /** Blinn-Phong for one light direction, already normalized. */
+    const highlight = (lx: number, ly: number, lz: number): number => {
+      if (specular <= 0) return 0
+      let hx = lx + vx
+      let hy = ly + vy
+      let hz = lz + vz
       const hlen = Math.hypot(hx, hy, hz) || 1
       hx /= hlen
       hy /= hlen
       hz /= hlen
-      spec = specular * Math.pow(Math.max(0, nx * hx + ny * hy + nz * hz), shininess)
+      return specular * Math.pow(Math.max(0, nx * hx + ny * hy + nz * hz), shininess)
+    }
+
+    // The directional light, unchanged: one direction for the whole scene.
+    const facing = Math.max(0, nx * l.x + ny * l.y + nz * l.z)
+    // A surface already turned away from the light cannot be shadowed further,
+    // and asking would cost a whole second march per cell to learn nothing.
+    const litBy = shadow && facing > 0 ? shadow(f.px, f.py, f.pz) : 1
+    const reach = facing * litBy
+
+    let dr = reach * lightColor.x
+    let dg = reach * lightColor.y
+    let db = reach * lightColor.z
+    let spec = facing > 0 ? highlight(l.x, l.y, l.z) * litBy : 0
+
+    for (const p of points) {
+      let px = p.position.x - f.px
+      let py = p.position.y - f.py
+      let pz = p.position.z - f.pz
+      const d2 = px * px + py * py + pz * pz
+      const range = p.range ?? 10
+      if (d2 >= range * range) continue
+
+      const dist = Math.sqrt(d2)
+      px /= dist || 1
+      py /= dist || 1
+      pz /= dist || 1
+      const towards = Math.max(0, nx * px + ny * py + nz * pz)
+      if (towards <= 0) continue
+
+      // Inverse square, windowed so it is exactly zero at the range rather
+      // than merely small there. The guard on the denominator keeps a light
+      // sitting on a surface from dividing by nothing.
+      const s = dist / range
+      const window = 1 - s * s * s * s
+      const fall = ((p.intensity ?? 1) * window * window) / Math.max(d2, 1e-4)
+
+      const visible = p.shadow ? p.shadow(f.px, f.py, f.pz) : 1
+      if (visible <= 0) continue
+
+      const gain = towards * fall * visible
+      // White by default, not the directional light's colour. A lamp is its
+      // own light: inheriting `lightColor` means dimming the sun silently
+      // switches off every lamp in the scene, which is how this was found.
+      const color = p.color ?? vec3(1, 1, 1)
+      dr += gain * color.x
+      dg += gain * color.y
+      db += gain * color.z
+      spec += highlight(px, py, pz) * fall * visible
     }
 
     let ar = albedo.x
@@ -76,15 +153,9 @@ export function lambert(options: LambertOptions = {}): Shader {
       ab *= texel[2]!
     }
 
-    // A surface already turned away from the light cannot be shadowed further,
-    // and asking would cost a whole second march per cell to learn nothing.
-    const lit = shadow && diffuse > 0 ? shadow(f.px, f.py, f.pz) : 1
-    const d = diffuse * lit
-    spec *= lit
-
-    out.r = Math.min(1, ar * (ambient + d * lightColor.x) + spec)
-    out.g = Math.min(1, ag * (ambient + d * lightColor.y) + spec)
-    out.b = Math.min(1, ab * (ambient + d * lightColor.z) + spec)
+    out.r = Math.min(1, ar * (ambient + dr) + spec)
+    out.g = Math.min(1, ag * (ambient + dg) + spec)
+    out.b = Math.min(1, ab * (ambient + db) + spec)
   }
 }
 

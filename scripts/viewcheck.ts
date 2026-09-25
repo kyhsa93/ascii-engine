@@ -274,12 +274,18 @@ try {
   const smoothed = await readScreen(page)
 
   check('the aa button resamples without breaking the frame', () => {
+    // This used to also require the glyph count not to fall, and that was
+    // wrong twice over. Averaging pulls extremes toward the middle, so on a
+    // ten-level ramp two neighbouring shades can land on one -- and which
+    // shades are on screen depends on the spin angle the pause happened to
+    // catch, so the assertion came and went between runs. It reproduces at
+    // 2ea5d46, before any of the lighting work, which is how it was ruled out
+    // as a regression. What the averaging actually computes is settled in
+    // `npm run check`: a flat silhouette has exactly 2 shades there and a
+    // supersampled one at least 5.
     assert(smoothed.digest !== grounded.digest, 'the frame is identical with and without supersampling')
     assert(smoothed.shape === grounded.shape, `the subject changed underneath the test: ${smoothed.shape}`)
-    assert(
-      smoothed.glyphs >= grounded.glyphs,
-      `averaging should not lose shades: ${grounded.glyphs} glyphs became ${smoothed.glyphs}`,
-    )
+    assert(smoothed.glyphs >= 2, `the frame collapsed to ${smoothed.glyphs} glyphs`)
     assert(problems.length === 0, `the supersampling path threw: ${problems.join(' | ')}`)
     assert(smoothed.frames > grounded.frames, `frames stopped after switching aa on, stuck at ${grounded.frames}`)
   })
@@ -317,6 +323,35 @@ try {
     assert(annotated.letters, `expected the x, y and z labels, found "${annotated.sample}"`)
     assert(problems.length === 0, `the overlay path threw: ${problems.join(' | ')}`)
     assert(annotated.frames > wired.frames, `frames stopped after switching axes on, stuck at ${wired.frames}`)
+  })
+
+  // Still paused. A lamp adds light rather than replacing it, so the frame
+  // has to get brighter somewhere and cannot get darker anywhere -- that is
+  // the one claim a page can make about it. Whether the falloff is an inverse
+  // square, and whether the range really reaches zero, is arithmetic and is
+  // settled in `npm run check`.
+  // The wireframe shader never calls `lambert` -- with no fill it writes a
+  // line colour or a blank -- so a lamp switched on underneath it changes
+  // nothing at all. Measured: 667 of 8150 glyphs move when the subject is
+  // shaded, and 0 when it is wire. So put the shading back first, or this
+  // check asks a question the state cannot answer.
+  await page.click('button[data-action="wire"]')
+  await page.waitForTimeout(250)
+  const reshaded = await readScreen(page)
+
+  await page.click('button[data-action="lamp"]')
+  await page.waitForTimeout(400)
+  const lamplit = await readScreen(page)
+
+  check('the lamp button adds light without taking any away', () => {
+    // Compare against `reshaded`, the frame immediately before the lamp -- not
+    // against `annotated`, which still had the wireframe on. Comparing across
+    // the wire-off click would pass on that click alone and say nothing about
+    // the lamp, which is how this check read before the state was fixed.
+    assert(reshaded.digest !== annotated.digest, 'switching the wireframe off changed nothing')
+    assert(lamplit.digest !== reshaded.digest, 'the frame is identical with and without the lamp')
+    assert(problems.length === 0, `the point light path threw: ${problems.join(' | ')}`)
+    assert(lamplit.frames > reshaded.frames, `frames stopped after the lamp, stuck at ${reshaded.frames}`)
   })
 
   await page.screenshot({ path: join(SHOTS, 'desktop.png') })

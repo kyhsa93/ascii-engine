@@ -42,7 +42,7 @@ import { RAMPS } from '../src/core/ramp.ts'
 import type { Shader } from '../src/core/raster.ts'
 import { drawMesh } from '../src/core/renderer.ts'
 import { sdBox, sdSphere, smoothUnion, translate } from '../src/core/sdf.ts'
-import { shadowFrom } from '../src/core/shadow.ts'
+import { shadowFrom, shadowFromPoint } from '../src/core/shadow.ts'
 import { lambert, unlit, wireframe } from '../src/core/shading.ts'
 import { Supersampler } from '../src/core/supersample.ts'
 import { checker, fromAscii, parsePpm, sample, texture, writePpm } from '../src/core/texture.ts'
@@ -1771,6 +1771,154 @@ test('drawAxes draws three lettered axes', () => {
   }
   assert(hues.size >= 3, `expected three axis colours, found ${hues.size}`)
   console.log('\n' + frame + '\n')
+})
+
+console.log('\npoint lights')
+
+/** Drives a shader at one fragment, with a flat surface facing +y at the origin. */
+function shadeAt(shader: Shader, px: number, py: number, pz: number, n = vec3(0, 1, 0)) {
+  const frag = { px, py, pz, nx: n.x, ny: n.y, nz: n.z, u: 0, v: 0, edge: 9, cx: 0, cy: 0, invW: 1 }
+  const out = { r: 0, g: 0, b: 0, char: 0 }
+  shader(frag, out)
+  return out
+}
+
+test('a point light falls off as the inverse square', () => {
+  // With the range far away its window is barely doing anything, so what is
+  // left is the physics: twice as far is a quarter as bright.
+  const shader = lambert({
+    albedo: vec3(1, 1, 1),
+    light: vec3(0, 1, 0),
+    lightColor: vec3(0, 0, 0),
+    ambient: 0,
+    points: [{ position: vec3(0, 2, 0), intensity: 1, range: 1000 }],
+  })
+
+  const near = shadeAt(shader, 0, 0, 0).r
+  const far = shadeAt(shader, 0, -2, 0).r
+  assert(near > 0 && far > 0, `both points should be lit, got ${near} and ${far}`)
+  close(near / far, 4, 0.01, 'doubling the distance should quarter the light')
+})
+
+test('a light brighter than the ramp clamps rather than wrapping', () => {
+  // Worth its own assertion because it is also the trap in the test below:
+  // the shader's output is clamped, so comparing it against an unclamped
+  // formula reads "exactly 1" and looks like the light failing.
+  const shader = lambert({
+    albedo: vec3(1, 1, 1),
+    light: vec3(0, 1, 0),
+    lightColor: vec3(0, 0, 0),
+    ambient: 0,
+    points: [{ position: vec3(0, 1, 0), intensity: 50, range: 20 }],
+  })
+  close(shadeAt(shader, 0, 0, 0).r, 1, 0, 'an overbright light should saturate at one')
+})
+
+test('the falloff is exactly the formula, window and all', () => {
+  const position = vec3(0, 3, 0)
+  // Dim enough that every distance below stays under the shader's clamp --
+  // otherwise this compares a clamped output against an unclamped formula.
+  const intensity = 0.5
+  const range = 5
+  const shader = lambert({
+    albedo: vec3(1, 1, 1),
+    light: vec3(0, 1, 0),
+    lightColor: vec3(0, 0, 0),
+    ambient: 0,
+    points: [{ position, intensity, range }],
+  })
+
+  for (const d of [1, 2, 3, 4.5]) {
+    const s = d / range
+    const w = 1 - s * s * s * s
+    // The surface faces straight up at the light, so the cosine is one.
+    close(shadeAt(shader, 0, 3 - d, 0).r, (intensity * w * w) / (d * d), 1e-9, `falloff at distance ${d}`)
+  }
+})
+
+test('the range is a bound, not a suggestion', () => {
+  // A falloff that only gets small near its range costs every fragment in the
+  // scene forever. This one has to reach zero exactly at it.
+  const shader = lambert({
+    albedo: vec3(1, 1, 1),
+    light: vec3(0, 1, 0),
+    lightColor: vec3(0, 0, 0),
+    ambient: 0,
+    points: [{ position: vec3(0, 4, 0), intensity: 5, range: 4 }],
+  })
+
+  assert(shadeAt(shader, 0, 1, 0).r > 0, 'inside the range the light should reach')
+  close(shadeAt(shader, 0, 0, 0).r, 0, 0, 'at exactly the range the light must be zero')
+  close(shadeAt(shader, 0, -1, 0).r, 0, 0, 'past the range the light must stay zero')
+})
+
+test('a point light lights two surfaces from opposite sides', () => {
+  // The claim that separates a lamp from a direction: a directional light
+  // cannot do this, because its direction is the same everywhere.
+  const shader = lambert({
+    albedo: vec3(1, 1, 1),
+    light: vec3(0, 1, 0),
+    lightColor: vec3(0, 0, 0),
+    ambient: 0,
+    points: [{ position: vec3(0, 0, 0), intensity: 1, range: 10 }],
+  })
+
+  // Two surfaces either side of the lamp, each facing it: normals point in
+  // opposite directions and both must be lit.
+  const above = shadeAt(shader, 0, 2, 0, vec3(0, -1, 0)).r
+  const below = shadeAt(shader, 0, -2, 0, vec3(0, 1, 0)).r
+  close(above, below, 1e-9, 'symmetric surfaces should be lit equally')
+  assert(above > 0, 'a surface facing the lamp should be lit')
+
+  // And turning one away puts it out, without touching the other.
+  close(shadeAt(shader, 0, 2, 0, vec3(0, 1, 0)).r, 0, 1e-9, 'a surface facing away should be dark')
+})
+
+test('an occluder beyond the lamp casts no shadow', () => {
+  // The bug a bounded ray exists to prevent: marching past the light finds
+  // whatever is behind it and darkens a surface the light does reach.
+  const lamp = vec3(0, 2, 0)
+  const past = shadowFromPoint(translate(sdSphere(0.5), 0, 4, 0), lamp)
+  const between = shadowFromPoint(translate(sdSphere(0.5), 0, 1, 0), lamp)
+
+  close(past(0, 0, 0), 1, 1e-9, 'a sphere behind the lamp blocked nothing and must not darken this')
+  close(between(0, 0, 0), 0, 1e-9, 'a sphere between the surface and the lamp must block it')
+})
+
+test('a lamp shadow follows the lamp, not a fixed direction', () => {
+  // An occluder directly between surface and lamp blocks it; move the lamp
+  // sideways and the same occluder stops mattering.
+  const field = translate(sdSphere(0.4), 0, 1, 0)
+  close(shadowFromPoint(field, vec3(0, 2, 0))(0, 0, 0), 0, 1e-9, 'straight overhead the sphere is in the way')
+  close(shadowFromPoint(field, vec3(4, 2, 0))(0, 0, 0), 1, 1e-9, 'off to the side it is not')
+})
+
+test('a lamp draws a bright pool that fades with distance', () => {
+  const camera = new Camera({ position: vec3(0, 4.5, 6), target: vec3(0, 0, 0), fovY: Math.PI / 3 })
+  const aspect = aspectFor(78, 30, 0.5)
+  const fb = new Framebuffer(78, 30)
+  fb.clear(0, 0, 0)
+  const lamp = vec3(0, 1.5, 0)
+  drawMesh(
+    fb,
+    plane(16, 1),
+    identity(),
+    camera.viewProjection(aspect),
+    lambert({
+      albedo: vec3(0.85, 0.82, 0.75),
+      lightColor: vec3(0, 0, 0),
+      light: vec3(0, 1, 0),
+      ambient: 0.06,
+      points: [{ position: lamp, intensity: 3.5, range: 9 }],
+    }),
+  )
+  fb.resolve(RAMPS.long)
+
+  // Brightest under the lamp, dimmer further out along the floor.
+  const centre = fb.color[(Math.floor(fb.height * 0.62) * fb.width + 39) * 3]!
+  const edge = fb.color[(Math.floor(fb.height * 0.62) * fb.width + 4) * 3]!
+  assert(centre > edge * 2, `the pool should fall off across the floor: ${centre} against ${edge}`)
+  console.log('\n' + fb.toString() + '\n')
 })
 
 console.log('\ncharacter output')

@@ -41,6 +41,58 @@ export interface ShadowOptions {
   bias?: number
 }
 
+export interface PointShadowOptions extends Omit<ShadowOptions, 'light' | 'maxDistance'> {
+  /**
+   * How far short of the light to stop.
+   *
+   * The ray ends *at* the lamp, so anything past it is not between the surface
+   * and the light and must not darken it. Stopping a whisker early also keeps
+   * geometry the lamp is sitting on from shadowing everything it lights.
+   */
+  endBias?: number
+}
+
+/**
+ * Occlusion for a light at a position rather than a direction.
+ *
+ * Two things change against `shadowFrom`. The ray's direction is recomputed
+ * for every surface point, because a lamp is somewhere rather than somewhere
+ * *over there*. And its length is bounded by the distance to the lamp: an
+ * occluder beyond the light is behind it, not in front of it, and a march that
+ * keeps going puts shadows under things the light never reaches past.
+ */
+export function shadowFromPoint(field: Sdf, position: Vec3, options: PointShadowOptions = {}): Occlusion {
+  const softness = options.softness ?? 0
+  const maxSteps = options.maxSteps ?? 48
+  const epsilon = options.epsilon ?? 1e-3
+  const bias = options.bias ?? 0.02
+  const endBias = options.endBias ?? 0.02
+
+  return (x, y, z) => {
+    let dx = position.x - x
+    let dy = position.y - y
+    let dz = position.z - z
+    const distance = Math.hypot(dx, dy, dz)
+    if (distance <= bias + endBias) return 1
+    dx /= distance
+    dy /= distance
+    dz /= distance
+
+    const limit = distance - endBias
+    let t = bias
+    let visibility = 1
+
+    for (let step = 0; step < maxSteps && t < limit; step++) {
+      const d = field(x + dx * t, y + dy * t, z + dz * t)
+      if (d < epsilon) return 0
+      if (softness > 0) visibility = Math.min(visibility, (softness * d) / t)
+      t += d
+    }
+
+    return softness > 0 ? Math.min(1, Math.max(0, visibility)) : 1
+  }
+}
+
 export function shadowFrom(field: Sdf, options: ShadowOptions = {}): Occlusion {
   const l = normalize(options.light ?? vec3(0.5, 0.8, 0.6))
   const softness = options.softness ?? 0

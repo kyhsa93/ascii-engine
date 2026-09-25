@@ -1417,6 +1417,159 @@ test('a floor of triangles takes a shadow from a field', () => {
   console.log('\n' + fb.toString() + '\n')
 })
 
+console.log('\nshadow bounds')
+
+/** Floor points to ask an occlusion about, spread wide enough to include misses. */
+function floorGrid(y: number, span = 6, step = 0.1): [number, number, number][] {
+  const points: [number, number, number][] = []
+  for (let z = -span; z <= span; z += step) for (let x = -span; x <= span; x += step) points.push([x, y, z])
+  return points
+}
+
+const SHADOW_BOUND_FLOOR = floorGrid(-1.5)
+
+test('rejecting rays that cannot reach the caster changes no visibility at all', () => {
+  // Exactly identical, unlike the camera marcher's bound: that one moves where
+  // a surviving ray starts and so moves where sphere tracing stops, while this
+  // one only declines to march rays that could not have dimmed anything. There
+  // is no reason for a single value to move, so any movement is a defect.
+  //
+  // Checked across softness because the margin a penumbra needs is derived
+  // from it, and a margin that is right at one softness and wrong at another
+  // would otherwise pass on whichever one the test happened to pick.
+  const field = sdSphere(1.3)
+  const drift: string[] = []
+
+  for (const softness of [0, 4, 12, 48]) {
+    const plain = shadowFrom(field, { light: SHADOW_LIGHT, softness, maxDistance: 12 })
+    const bounded = shadowFrom(field, { light: SHADOW_LIGHT, softness, maxDistance: 12, casterRadius: 1.3 })
+    let worst = 0
+    for (const [x, y, z] of SHADOW_BOUND_FLOOR) worst = Math.max(worst, Math.abs(plain(x, y, z) - bounded(x, y, z)))
+    if (worst !== 0) drift.push(`directional softness ${softness} by ${worst.toExponential(2)}`)
+
+    const lampPlain = shadowFromPoint(field, vec3(1.6, 1.5, 1.6), { softness })
+    const lampBounded = shadowFromPoint(field, vec3(1.6, 1.5, 1.6), { softness, casterRadius: 1.3 })
+    let lampWorst = 0
+    for (const [x, y, z] of SHADOW_BOUND_FLOOR) {
+      lampWorst = Math.max(lampWorst, Math.abs(lampPlain(x, y, z) - lampBounded(x, y, z)))
+    }
+    if (lampWorst !== 0) drift.push(`lamp softness ${softness} by ${lampWorst.toExponential(2)}`)
+  }
+
+  assert(drift.length === 0, `visibility moved: ${drift.join(', ')}`)
+})
+
+test('a penumbra is made by the rays that pass wide, so the margin is not optional', () => {
+  // The falsification, and a warning to anyone who notices that the camera
+  // marcher starts its rays at the bounding sphere and wonders why this one
+  // does not. Rejecting at the caster's own radius -- no margin for softness --
+  // must visibly break the soft band, or the margin is decoration and the
+  // check above is proving nothing.
+  //
+  // Measured while writing this: a sphere of radius 1.3 with softness 12,
+  // rejected at 1.35, takes a floor point from 0.1667 to fully lit.
+  const field = sdSphere(1.3)
+  const soft = shadowFrom(field, { light: SHADOW_LIGHT, softness: 12, maxDistance: 12 })
+
+  // The same rejection the engine does, but with the margin left out.
+  const l = normalize(SHADOW_LIGHT)
+  const naive = (x: number, y: number, z: number) => {
+    const tca = -x * l.x + -y * l.y + -z * l.z
+    if (tca < 0) return 1
+    const perp2 = x * x + y * y + z * z - tca * tca
+    return perp2 > 1.35 * 1.35 ? 1 : soft(x, y, z)
+  }
+
+  let worst = 0
+  for (const [x, y, z] of SHADOW_BOUND_FLOOR) worst = Math.max(worst, Math.abs(soft(x, y, z) - naive(x, y, z)))
+  assert(worst > 0.5, `a margin-free rejection changed visibility by only ${worst.toExponential(2)}`)
+
+  // A hard shadow has no penumbra, so it needs no softness margin -- but it
+  // still needs an epsilon one, and that is the half I got wrong first. A
+  // march counts a ray as blocked once the field drops below `epsilon`, so the
+  // shadow it casts is the caster inflated by that much, while this rejection
+  // is exact geometry. Rejecting a hard shadow at exactly the caster's radius
+  // loses the rim of the umbra, the same way the camera marcher's `bounds`
+  // loses four cells to rays passing 1.000454 from a unit sphere.
+  const hard = shadowFrom(field, { light: SHADOW_LIGHT, maxDistance: 12 })
+  const hardNaive = (x: number, y: number, z: number) => {
+    const tca = -x * l.x + -y * l.y + -z * l.z
+    if (tca < 0) return 1
+    return x * x + y * y + z * z - tca * tca > 1.3 * 1.3 ? 1 : hard(x, y, z)
+  }
+  let hardWorst = 0
+  for (const [x, y, z] of SHADOW_BOUND_FLOOR) hardWorst = Math.max(hardWorst, Math.abs(hard(x, y, z) - hardNaive(x, y, z)))
+  assert(
+    hardWorst > 0,
+    'a hard shadow survived a rejection at exactly the caster radius, so either epsilon changed or the rim is not being drawn',
+  )
+})
+
+test('the bound is most of a shadow pass, not a trim', () => {
+  // The measurement that motivated this: on the demo's floor, 91% of every
+  // field evaluation in a directional shadow pass belonged to rays marching
+  // away from the only caster in the scene. Asserted rather than commented.
+  //
+  // The two lights get different floors, because their ray geometry differs
+  // and one threshold would be a number copied rather than derived. A
+  // directional light's rays are parallel, so whether one passes near the
+  // caster depends only on where the floor point is; a lamp sits inside the
+  // scene, so every ray on the floor fans toward one point a couple of units
+  // up and far more of them pass close. Measured over the same floor: the
+  // directional bound rejects 12234 of 14641 rays, the lamp 8553. It is not
+  // the margin -- giving the directional bound the lamp's widest margin still
+  // rejects 12369.
+  //
+  // The floors sit below the measured savings rather than on them. Measured
+  // here: directional 64.9% (22330 evaluations against 63561), lamp 33.1%
+  // (50645 against 75669). A floor pressed up against the measurement is a
+  // check that fails one day for no reason at all, which is a worse outcome
+  // than one that never fires.
+  const FLOORS: Record<string, number> = { directional: 0.55, lamp: 0.25 }
+  const counts: [string, number][] = []
+
+  for (const [name, make] of [
+    [
+      'directional',
+      (counted: Sdf, casterRadius?: number) =>
+        shadowFrom(counted, {
+          light: SHADOW_LIGHT,
+          softness: 12,
+          maxDistance: 12,
+          ...(casterRadius === undefined ? {} : { casterRadius }),
+        }),
+    ],
+    [
+      'lamp',
+      (counted: Sdf, casterRadius?: number) =>
+        shadowFromPoint(counted, vec3(1.6, 1.5, 1.6), {
+          softness: 12,
+          ...(casterRadius === undefined ? {} : { casterRadius }),
+        }),
+    ],
+  ] as const) {
+    const spend = (casterRadius?: number) => {
+      let evals = 0
+      const counted: Sdf = (x, y, z) => {
+        evals++
+        return sdSphere(1.3)(x, y, z)
+      }
+      const occl = make(counted, casterRadius)
+      for (const [x, y, z] of SHADOW_BOUND_FLOOR) occl(x, y, z)
+      return evals
+    }
+    counts.push([name, 1 - spend(1.3) / spend()])
+  }
+
+  const weak = counts.filter(([name, saved]) => saved <= FLOORS[name]!)
+  assert(
+    weak.length === 0,
+    `the bound saved too little: ${weak
+      .map(([n, s]) => `${n} ${(s * 100).toFixed(0)}% against a floor of ${(FLOORS[n]! * 100).toFixed(0)}%`)
+      .join(', ')}`,
+  )
+})
+
 console.log('\nsupersampling')
 
 /** A white half-plane whose right edge sits at `edgeX`, facing +z. */

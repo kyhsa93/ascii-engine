@@ -442,6 +442,53 @@ Two things to know before using it.
   passing 1.000454 from the centre — outside the sphere, inside the epsilon. At
   1.001 nothing is lost. Leave at least `epsilon` of clearance.
 
+## Shadow bounds
+
+`shadowFrom` and `shadowFromPoint` take an optional `casterRadius`: a sphere
+about the origin holding everything in the field that can cast. A ray that
+cannot reach it is answered as fully lit without sampling the field.
+
+```ts
+shadowFrom(subject.field(spin), {
+  light: LIGHT,
+  softness: 12,
+  casterRadius: subject.radius,
+})
+```
+
+It is worth having for the same reason the marcher's `bounds` is. Measured on
+the demo's floor, 91% of every field evaluation in a directional shadow pass
+belonged to rays marching away from the only caster in the scene. With the
+bound on, a directional pass costs 65% fewer evaluations and a lamp pass 33%.
+
+The gap between those two is geometry, not tuning. A directional light's rays
+are parallel, so whether one passes near the caster depends only on where the
+floor point is; a lamp sits inside the scene, so the rays fan toward one point
+and far more of them pass close. Over the same floor the directional bound
+rejects 12234 of 14641 rays and the lamp 8553 — and it is not the margin,
+since giving the directional bound the lamp's widest margin still rejects
+12369.
+
+**This is not the marcher's bound, and the difference matters.** Two things
+that are right there are wrong here.
+
+- **A surviving ray must not be shortened.** The marcher starts a clipped ray
+  at the bounding sphere's entry point, which is most of its saving. Softness
+  is a running minimum of `softness * d / t` over the whole ray, so dropping
+  the early samples drops the terms the minimum is made of. Measured, that
+  version was still wrong at four times the caster's radius. Rays here are
+  rejected or left completely alone.
+- **You pass the caster's radius, not the radius to reject at.** The margin is
+  derived, because guessing it is exactly the failure this is prone to. A ray
+  only dims something where `softness * d / t < 1`, so the furthest one that
+  still counts clears the caster by `reach / softness`; a march also counts
+  anything within `epsilon` of the surface as blocked, so that is added too.
+  Reject without the softness term and the soft band snaps to lit — on a
+  sphere of radius 1.3 at softness 12, rejecting at 1.35 takes a floor point
+  from 0.1667 to 1.0000. Reject without the epsilon term and even a hard
+  shadow loses the rim of its umbra, which is the same trap as bounding a unit
+  sphere at exactly 1 in the marcher.
+
 ## Writing a shader
 
 A shader is a plain function. It is handed the interpolated fragment and a

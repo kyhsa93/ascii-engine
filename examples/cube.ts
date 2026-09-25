@@ -216,6 +216,11 @@ const loop = runLoop((dt) => {
         epsilon: 2e-3,
         maxSteps: 32,
         maxDistance: 12,
+        // The subject's own radius, not a padded one: unlike the marcher's
+        // `bounds`, the margin a penumbra needs is derived from `softness` and
+        // `maxDistance` inside the occluder. Padding it here would only widen
+        // an already generous margin and give back the saving.
+        casterRadius: subject.radius,
       })
     : undefined
 
@@ -232,7 +237,9 @@ const loop = runLoop((dt) => {
           position: LAMP,
           intensity: 6,
           range: LAMP_RANGE,
-          ...(shadows ? { shadow: shadowFromPoint(subject.field(spin), LAMP, { softness: 12 }) } : {}),
+          ...(shadows
+            ? { shadow: shadowFromPoint(subject.field(spin), LAMP, { softness: 12, casterRadius: subject.radius }) }
+            : {}),
         },
       ]
     : []

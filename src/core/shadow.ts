@@ -39,6 +39,57 @@ export interface ShadowOptions {
    * hit and the whole object goes black.
    */
   bias?: number
+  /**
+   * Radius of a sphere about the origin holding every caster in `field`.
+   *
+   * Given one, a ray that cannot reach the casters is answered as fully lit
+   * without sampling the field at all. On the demo's floor that is most of
+   * them: 91% of a directional shadow pass was rays marching away from the
+   * only thing in the scene.
+   *
+   * This is the caster's own radius, not the radius to reject at -- the margin
+   * a penumbra needs is worked out from `softness` and `maxDistance`, because
+   * getting it wrong is not a rounding error. Softness is a running minimum of
+   * `softness * d / t`, so the rays that produce a penumbra are exactly the
+   * ones that pass *wide* of the caster; reject those and the soft band
+   * snaps to fully lit. Measured on a sphere of radius 1.3 with softness 12,
+   * rejecting at 1.35 moves a floor point from 0.1667 to 1.0000.
+   *
+   * The one thing this must not do is move where a surviving ray starts.
+   * Clipping the start to the sphere's entry point is what the camera marcher
+   * does and it is pure damage here: it drops the early samples the running
+   * minimum is made of, and the penumbra was still wrong at four times the
+   * caster's radius. Rays are rejected or left alone, never shortened.
+   */
+  casterRadius?: number
+}
+
+/**
+ * How wide of the casters a ray can pass and still matter.
+ *
+ * Two separate margins, and leaving either out loses geometry.
+ *
+ * A soft ray dims something wherever `softness * d / t < 1`, so the furthest
+ * one that still counts clears the casters by `reach / softness`. Reject
+ * inside that and the soft band snaps to fully lit: measured on a sphere of
+ * radius 1.3 at softness 12, rejecting at 1.35 takes a floor point from 0.1667
+ * to 1.0000.
+ *
+ * And every ray, hard or soft, counts as blocked once the field falls below
+ * `epsilon`, so the shadow a march casts is the caster inflated by that much
+ * while this test is exact geometry. A hard shadow needs no penumbra margin
+ * but still needs this one -- the same trap as the camera marcher's `bounds`,
+ * where a unit sphere bounded at exactly 1 lost four rim cells to rays passing
+ * 1.000454 from the centre.
+ *
+ * Deliberately generous on the softness term: against the smallest radius that
+ * reproduces the unbounded answer exactly, it over-estimates by 1.1x to 1.6x
+ * across softness 4 to 48, for both a direction and a lamp. Over-estimating
+ * costs a few rays that would have been skipped; under-estimating puts a hard
+ * edge where a soft one belongs.
+ */
+function rejectionRadius(casterRadius: number, softness: number, reach: number, epsilon: number): number {
+  return casterRadius + epsilon + (softness > 0 ? reach / softness : 0)
 }
 
 export interface PointShadowOptions extends Omit<ShadowOptions, 'light' | 'maxDistance'> {
@@ -68,6 +119,8 @@ export function shadowFromPoint(field: Sdf, position: Vec3, options: PointShadow
   const bias = options.bias ?? 0.02
   const endBias = options.endBias ?? 0.02
 
+  const casterRadius = options.casterRadius
+
   return (x, y, z) => {
     let dx = position.x - x
     let dy = position.y - y
@@ -79,6 +132,16 @@ export function shadowFromPoint(field: Sdf, position: Vec3, options: PointShadow
     dz /= distance
 
     const limit = distance - endBias
+
+    // A lamp ray is only as long as the lamp is far, so that distance is the
+    // reach the margin is worked out from.
+    if (casterRadius !== undefined) {
+      const tca = -x * dx + -y * dy + -z * dz
+      if (tca < 0) return 1
+      const perp2 = x * x + y * y + z * z - tca * tca
+      const wide = rejectionRadius(casterRadius, softness, limit, epsilon)
+      if (perp2 > wide * wide) return 1
+    }
     let t = bias
     let visibility = 1
 
@@ -101,7 +164,18 @@ export function shadowFrom(field: Sdf, options: ShadowOptions = {}): Occlusion {
   const epsilon = options.epsilon ?? 1e-3
   const bias = options.bias ?? 0.02
 
+  const casterRadius = options.casterRadius
+  const wide = casterRadius === undefined ? 0 : rejectionRadius(casterRadius, softness, maxDistance, epsilon)
+
   return (x, y, z) => {
+    if (casterRadius !== undefined) {
+      // How far the ray passes from the casters, and whether it heads toward
+      // them at all. Both are one dot product away; neither samples the field.
+      const tca = -x * l.x + -y * l.y + -z * l.z
+      if (tca < 0) return 1
+      if (x * x + y * y + z * z - tca * tca > wide * wide) return 1
+    }
+
     let t = bias
     let visibility = 1
 

@@ -383,6 +383,46 @@ try {
 
   await phone.screenshot({ path: join(SHOTS, 'phone.png') })
 
+  // The presenter writes a node per row and rounds colour so that runs of one
+  // colour are long. Both are performance decisions with visible consequences,
+  // so both are held to something here.
+  const presented = await page.evaluate(() => {
+    const screen = document.getElementById('screen')!
+    const levels = new Set<number>()
+    for (let i = 0; i <= 31; i++) levels.add(Math.round((i / 31) * 255))
+    const offGrid: string[] = []
+    let spans = 0
+    for (const span of Array.from(screen.querySelectorAll('span'))) {
+      const colour = (span as HTMLElement).style.color
+      const parts = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(colour)
+      if (!parts) continue
+      spans++
+      for (let c = 1; c <= 3; c++) {
+        if (!levels.has(Number(parts[c]))) offGrid.push(colour)
+      }
+    }
+    return { rows: screen.children.length, spans, offGrid: offGrid.slice(0, 3), offCount: offGrid.length }
+  })
+
+  check('the presenter keeps a node per row of the grid', () => {
+    assert(
+      presented.rows === first.rows,
+      `${presented.rows} row nodes against a grid ${first.rows} rows tall`,
+    )
+  })
+
+  check('colour reaches the page rounded to the depth asked for', () => {
+    // Five bits a channel, which is what keeps a row to about fifteen spans
+    // instead of thirty-six. A channel off that grid means the rounding was
+    // skipped, and the frame rate goes with it: measured, eight bits cost a
+    // third of it.
+    assert(presented.spans > 0, 'no coloured spans on screen to check at all')
+    assert(
+      presented.offCount === 0,
+      `${presented.offCount} channels are not on the five-bit grid, e.g. ${presented.offGrid.join(', ')}`,
+    )
+  })
+
   console.log(
     `\n  grid ${first.cols}x${first.rows} cells, cell aspect ${first.cellAspect.toFixed(3)}` +
       `, sphere ${round.bboxW}x${round.bboxH}\n  shots in ${SHOTS}\n`,

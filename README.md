@@ -42,11 +42,13 @@ src/core/     the renderer — no terminal, no DOM
   shading.ts    Lambert + Blinn-Phong, normal debug view
   framebuffer.ts  the character grid, and luminance -> glyph resolution
   ramp.ts       character ramps
+  overlay.ts    text, lines and axes drawn over a finished frame
+  index.ts      re-exports the modules above
 src/term/     ANSI presenter (diffed writes, 256-colour and truecolour)
 src/web/      <pre> presenter (measures its own cell size)
-examples/     terminal demo
+examples/     terminal demos (the scene, and an OBJ viewer)
 web/          browser demo
-scripts/      test suite
+scripts/      test suite, browser check, model generator
 ```
 
 ## The three things that make this different from a pixel renderer
@@ -573,13 +575,18 @@ Terminal and browser share the same scene.
 | `r` | cycle character ramp |
 | `t` | toggle the checker map (meshes only — a field has no uv) |
 | `s` | toggle the floor and its shadow |
+| `a` | toggle antialiasing (supersampling) |
+| `w` | toggle wireframe |
+| `o` | toggle the axes overlay |
+| `l` | toggle the point light |
 | `n` | toggle the normal debug view |
 | `p` | pause the spin |
 | arrows | orbit the camera |
 | `+` / `-` | zoom |
 | `q` | quit |
 
-In the browser, drag to orbit and scroll to zoom.
+In the browser, the buttons under the screen do the same toggles; drag to
+orbit and scroll to zoom.
 
 ## Notes
 
